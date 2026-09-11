@@ -37,11 +37,13 @@
 #![deny(missing_docs)]
 
 pub mod candle;
+pub mod feed;
 pub mod instrument;
 pub mod series;
 pub mod session;
 
 pub use candle::{Candle, Interval};
+pub use feed::{FeedStore, RecordedQuote};
 pub use instrument::{Instrument, INSTRUMENTS};
 pub use series::mid_raw;
 pub use session::{SessionKind, SessionState};

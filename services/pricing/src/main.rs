@@ -15,10 +15,70 @@
 //! the book moved is asking about the venue quote. One number cannot answer
 //! both questions.
 
+use std::time::Duration;
+
+use domain_kernel::Price;
+use market_core::feed::parse_price_raw;
 use market_core::instrument::{find, INSTRUMENTS};
-use market_core::{quote_at, tick_of, Instrument, MarketError, TICK_MS};
-use service_kit::json::escape;
+use market_core::{tick_of, Instrument, MarketError, Quote, TICK_MS};
+use service_kit::json::{escape, Value};
 use service_kit::{log, port_from_env, Request, Response, Service, ServiceInfo};
+
+/// Where the venue quote comes from.
+///
+/// The pricing function itself is pure in the venue quote; only the *source*
+/// of that quote touches the network. In the service it is `06-market-data`;
+/// in the tests it is the synthetic function, so INV-060 is proven without a
+/// socket.
+type VenueSource = dyn Fn(&Instrument, u64) -> Result<Quote, String> + Send + Sync;
+
+/// The synthetic feed as a venue source.
+#[cfg(test)]
+fn synthetic_venue(instrument: &Instrument, tick: u64) -> Result<Quote, String> {
+    market_core::quote_at(instrument, tick).map_err(|err| err.to_string())
+}
+
+/// `06-market-data` as a venue source.
+fn remote_venue(base: &str, instrument: &Instrument, tick: u64) -> Result<Quote, String> {
+    let url = format!("{base}/v1/quote?symbol={}&tick={tick}", instrument.symbol);
+    let response = service_kit::http::get(&url, Duration::from_millis(1_500))
+        .map_err(|err| format!("market-data unreachable: {err}"))?;
+    if !response.is_success() {
+        return Err(format!("market-data returned {}", response.status));
+    }
+    let body = response
+        .json()
+        .map_err(|err| format!("market-data sent malformed JSON: {err}"))?;
+    venue_from_json(instrument, &body)
+        .ok_or_else(|| "market-data sent an unusable quote".to_owned())
+}
+
+/// A venue quote from market-data's wire shape.
+fn venue_from_json(instrument: &Instrument, body: &Value) -> Option<Quote> {
+    let bid = body.str_field("bid").and_then(parse_price_raw)?;
+    let ask = body.str_field("ask").and_then(parse_price_raw)?;
+    let tick = body.get("tick").and_then(Value::as_u64)?;
+    let quote = Quote::validated(
+        instrument.symbol,
+        tick,
+        Price::from_raw(bid),
+        Price::from_raw(ask),
+    )
+    .ok()?;
+    let session = body.get("session");
+    let open = session
+        .and_then(|s| s.get("open"))
+        .is_none_or(|v| !matches!(v, Value::Bool(false)));
+    let priced = session
+        .and_then(|s| s.get("pricedTick"))
+        .and_then(Value::as_u64)
+        .unwrap_or(tick);
+    Some(if open {
+        quote
+    } else {
+        quote.frozen_since(priced)
+    })
+}
 
 /// The pricing configuration in force.
 ///
@@ -40,17 +100,16 @@ const CONFIG: PricingConfig = PricingConfig {
     max_age_ms: 500,
 };
 
-/// The client quote for `instrument` at `tick`, as raw price units.
+/// The client quote derived from a venue quote, as raw price units.
 ///
 /// Works on the raw price scale rather than on `Money`, because a price carries
 /// more decimal places than a currency does and rounding it to cents first
 /// would move the quote.
 fn client_quote(
+    venue: &Quote,
     instrument: &Instrument,
-    tick: u64,
     config: &PricingConfig,
 ) -> Result<(i128, i128, i128), MarketError> {
-    let venue = quote_at(instrument, tick)?;
     let mid = venue.mid().raw();
     // Half the markup either side, rounded up so the spread never narrows by
     // accident, then snapped to the instrument's quoted grid.
@@ -75,7 +134,7 @@ fn error(status: u16, code: &str, detail: &str) -> Response {
     )
 }
 
-fn handle(request: &Request, now: u64) -> Option<Response> {
+fn handle(request: &Request, now: u64, venue: &VenueSource) -> Option<Response> {
     match request.path.as_str() {
         "/v1/config" => Some(Response::json(
             200,
@@ -99,10 +158,19 @@ fn handle(request: &Request, now: u64) -> Option<Response> {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(now);
 
+            // The venue state for that tick, from market-data. Unreachable is
+            // a 503 with the reason, never a guessed price (P7).
+            let venue_quote = match venue(instrument, tick) {
+                Ok(quote) => quote,
+                Err(detail) => return Some(error(503, "market_state_unavailable", &detail)),
+            };
+
             // INV-062 — a quote derived from stale state is never emitted as
-            // live. The caller is told the age rather than handed a price.
-            let age_ms = now.saturating_sub(tick).saturating_mul(TICK_MS);
-            if age_ms > CONFIG.max_age_ms {
+            // live. The caller is told the age rather than handed a price. A
+            // frozen quote on a closed market is not stale: its age is the
+            // age of the state it was frozen *at* (INV-053).
+            let age_ms = venue_quote.age_ms(now);
+            if age_ms > CONFIG.max_age_ms && venue_quote.session_open() {
                 return Some(error(
                     409,
                     "stale_market_state",
@@ -113,7 +181,7 @@ fn handle(request: &Request, now: u64) -> Option<Response> {
                 ));
             }
 
-            match client_quote(instrument, tick, &CONFIG) {
+            match client_quote(&venue_quote, instrument, &CONFIG) {
                 Ok((bid, mid, ask)) => {
                     // INV-061, asserted before emission rather than assumed.
                     if bid > ask {
@@ -147,21 +215,29 @@ fn main() -> std::io::Result<()> {
     let info = ServiceInfo::from_env("pricing", "07-pricing", "T1");
     let mut service = Service::new(info.clone());
 
-    service.route_request(Box::new(|request| {
+    let base =
+        std::env::var("MARKET_DATA_URL").unwrap_or_else(|_| "http://market-data:8000".to_owned());
+    let venue: Box<VenueSource> =
+        Box::new(move |instrument, tick| remote_venue(&base, instrument, tick));
+    service.route_request(Box::new(move |request| {
         // ALLOW-BANNED: the tick a bare quote defaults to. Pricing itself is
         // pure — every function above takes the tick as an argument — and this
         // is the one place the current one is read.
         let millis = std::time::SystemTime::now() // ALLOW-BANNED
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis());
-        handle(request, tick_of(u64::try_from(millis).unwrap_or(0)))
+        handle(
+            request,
+            tick_of(u64::try_from(millis).unwrap_or(0)),
+            venue.as_ref(),
+        )
     }));
 
     log(
         &info,
         "info",
         &format!(
-            "pricing starting — pure function, no clock reads, {} instruments at {}bps",
+            "pricing starting — pure in the venue quote, {} instruments at {}bps",
             INSTRUMENTS.len(),
             CONFIG.markup_bps
         ),
@@ -175,7 +251,11 @@ mod tests {
     use super::*;
 
     fn quote(target: &str, now: u64) -> Response {
-        handle(&Request::get(target), now).unwrap()
+        handle(&Request::get(target), now, &synthetic_venue).unwrap()
+    }
+
+    fn venue(instrument: &Instrument, tick: u64) -> Quote {
+        market_core::quote_at(instrument, tick).unwrap()
     }
 
     /// INV-060 — identical input yields byte-identical output.
@@ -192,8 +272,8 @@ mod tests {
         for instrument in INSTRUMENTS {
             for tick in [0u64, 1, 4_000_000, 900_000_000] {
                 assert_eq!(
-                    client_quote(instrument, tick, &CONFIG),
-                    client_quote(instrument, tick, &CONFIG)
+                    client_quote(&venue(instrument, tick), instrument, &CONFIG),
+                    client_quote(&venue(instrument, tick), instrument, &CONFIG)
                 );
             }
         }
@@ -210,7 +290,8 @@ mod tests {
             };
             for instrument in INSTRUMENTS {
                 for tick in (0..20_000u64).step_by(499) {
-                    let (bid, mid, ask) = client_quote(instrument, tick, &config).unwrap();
+                    let (bid, mid, ask) =
+                        client_quote(&venue(instrument, tick), instrument, &config).unwrap();
                     assert!(
                         bid <= mid && mid <= ask,
                         "{} crossed at {markup_bps}bps, tick {tick}",
@@ -221,7 +302,8 @@ mod tests {
         }
         for instrument in INSTRUMENTS {
             for tick in (0..200_000u64).step_by(997) {
-                let (bid, _, ask) = client_quote(instrument, tick, &CONFIG).unwrap();
+                let (bid, _, ask) =
+                    client_quote(&venue(instrument, tick), instrument, &CONFIG).unwrap();
                 assert!(bid <= ask, "{} crossed at tick {tick}", instrument.symbol);
             }
         }
@@ -255,10 +337,10 @@ mod tests {
     fn the_client_quote_is_never_tighter_than_the_venue_quote() {
         for instrument in INSTRUMENTS {
             for tick in (0..50_000u64).step_by(311) {
-                let venue = quote_at(instrument, tick).unwrap();
-                let (bid, _, ask) = client_quote(instrument, tick, &CONFIG).unwrap();
+                let venue_quote = market_core::quote_at(instrument, tick).unwrap();
+                let (bid, _, ask) = client_quote(&venue_quote, instrument, &CONFIG).unwrap();
                 assert!(
-                    bid <= venue.bid().raw() && ask >= venue.ask().raw(),
+                    bid <= venue_quote.bid().raw() && ask >= venue_quote.ask().raw(),
                     "{} client quote is inside the venue quote at tick {tick}",
                     instrument.symbol
                 );
@@ -269,7 +351,8 @@ mod tests {
     #[test]
     fn a_quote_lands_on_the_instruments_quoted_grid() {
         for instrument in INSTRUMENTS {
-            let (bid, _, ask) = client_quote(instrument, 12_345, &CONFIG).unwrap();
+            let (bid, _, ask) =
+                client_quote(&venue(instrument, 12_345), instrument, &CONFIG).unwrap();
             assert_eq!(bid.checked_rem(instrument.point()), Some(0));
             assert_eq!(ask.checked_rem(instrument.point()), Some(0));
         }
@@ -285,6 +368,47 @@ mod tests {
         let response = quote("/v1/quote", 4_000_000);
         assert_eq!(response.status, 200);
         assert!(response.body.contains(r#""symbol":"EURUSD""#));
+    }
+
+    /// A frozen quote from a closed market is served as frozen, not refused
+    /// as stale: the state it was frozen at is the newest there will be until
+    /// the market reopens (INV-053 meets INV-062).
+    #[test]
+    fn a_frozen_quote_is_served_with_its_session_rather_than_refused() {
+        // 2026-09-12 12:00 UTC, a Saturday.
+        let saturday_noon = 1_789_214_400_000u64 / TICK_MS;
+        let response = quote(
+            &format!("/v1/quote?symbol=XAUUSD&tick={saturday_noon}"),
+            saturday_noon,
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(response.body.contains(r#""open":false"#));
+
+        // A venue that cannot be reached is a 503 with the reason, not a price.
+        let unreachable: Box<VenueSource> =
+            Box::new(|_, _| Err("market-data unreachable: test".to_owned()));
+        let refused = handle(
+            &Request::get("/v1/quote?symbol=EURUSD&tick=4000000"),
+            4_000_000,
+            unreachable.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(refused.status, 503);
+        assert!(refused.body.contains("market_state_unavailable"));
+
+        // The wire shape from market-data parses into the same venue quote.
+        let gold = find("XAUUSD").unwrap();
+        let body = service_kit::json::parse(
+            r#"{"symbol":"XAUUSD","bid":"2350.00","ask":"2350.30","tick":100,"session":{"open":false,"pricedTick":90}}"#,
+        )
+        .unwrap();
+        let parsed = venue_from_json(gold, &body).unwrap();
+        assert_eq!(parsed.bid().raw(), 235_000_000_000);
+        assert!(!parsed.session_open());
+        assert_eq!(parsed.priced_tick(), 90);
+        assert!(
+            venue_from_json(gold, &service_kit::json::parse(r#"{"bid":"x"}"#).unwrap()).is_none()
+        );
     }
 
     #[test]

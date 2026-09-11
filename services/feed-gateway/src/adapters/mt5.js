@@ -1,0 +1,110 @@
+/**
+ * MT5 — ticks from the MT5 bridge (`21-external`) over server-sent events.
+ *
+ * The bridge speaks the Project X bridge protocol whether it is the real
+ * terminal under Wine or the simulator: `GET /v1/ticks?symbols=…` streams
+ * `data: {"symbol":"EURUSD","bid":"1.08500","ask":"1.08520","ms":…}` lines.
+ * Needs `MT5_BRIDGE_URL`; unconfigured without it.
+ */
+
+import { Adapter, decimal } from "./base.js";
+import { toCanonical, toProvider } from "../symbols.js";
+
+/**
+ * One SSE `data:` payload as a canonical tick.
+ * @param {string} line The JSON after `data:`.
+ * @param {number} arrivalMs
+ * @returns {import("./base.js").Tick|null}
+ */
+export function parseTickLine(line, arrivalMs) {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!message || typeof message !== "object") return null;
+  const m = /** @type {Record<string, unknown>} */ (message);
+  const symbol = toCanonical("mt5", String(m.symbol ?? ""));
+  if (!symbol) return null;
+  const bid = decimal(m.bid, 8);
+  const ask = decimal(m.ask, 8);
+  if (!bid || !ask) return null;
+  return {
+    symbol,
+    ms: typeof m.ms === "number" ? m.ms : arrivalMs,
+    bid,
+    ask,
+    seq: typeof m.seq === "number" ? m.seq : 0,
+  };
+}
+
+export class Mt5Adapter extends Adapter {
+  constructor() {
+    super("mt5");
+    this.url = process.env.MT5_BRIDGE_URL ?? "";
+    /** @type {AbortController|null} */
+    this.controller = null;
+  }
+
+  configured() {
+    return this.url.length > 0;
+  }
+
+  connect() {
+    const symbols = this.symbols.map((s) => toProvider("mt5", s)).filter((s) => s !== undefined);
+    if (symbols.length === 0) {
+      this.state = "idle";
+      return;
+    }
+    const controller = new AbortController();
+    this.controller = controller;
+    const url = `${this.url}/v1/ticks?symbols=${encodeURIComponent(symbols.join(","))}`;
+    void this.consume(url, controller);
+  }
+
+  /**
+   * @param {string} url
+   * @param {AbortController} controller
+   */
+  async consume(url, controller) {
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { accept: "text/event-stream" },
+      });
+      if (!response.ok || !response.body) {
+        this.fail(`bridge returned ${response.status}`);
+        return;
+      }
+      this.up();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newline = buffer.indexOf("\n");
+        while (newline !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (line.startsWith("data:")) {
+            const tick = parseTickLine(line.slice(5).trim(), this.now());
+            if (tick) this.emit(tick);
+          }
+          newline = buffer.indexOf("\n");
+        }
+      }
+      if (this.controller === controller) this.fail("bridge stream ended");
+    } catch (error) {
+      if (this.controller === controller) this.fail(`bridge stream failed: ${String(error)}`);
+    }
+  }
+
+  disconnect() {
+    const controller = this.controller;
+    this.controller = null;
+    controller?.abort();
+  }
+}

@@ -19,7 +19,7 @@ WANT="${1:-all}"
 fail=0
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-PACKAGES=("services/client-api" "apps/web" "apps/ops")
+PACKAGES=("services/client-api" "services/feed-gateway" "services/mt5-sim" "apps/web" "apps/ops")
 
 # ---------------------------------------------------------------- G0 syntax
 if [ "$WANT" = "all" ] || [ "$WANT" = "--syntax" ]; then
@@ -30,7 +30,8 @@ if [ "$WANT" = "all" ] || [ "$WANT" = "--syntax" ]; then
     if ! node --check "$file" 2>/tmp/projectx-syntax.err; then
       echo "  ✗ $file"; sed 's/^/      /' /tmp/projectx-syntax.err; fail=1
     fi
-  done < <(find services/client-api/src apps/web/src apps/web/tests \
+  done < <(find services/client-api/src services/feed-gateway/src services/mt5-sim/src \
+                apps/web/src apps/web/tests \
                 apps/ops/src apps/ops/tests -name '*.js' \
              -not -path '*/node_modules/*' 2>/dev/null | sort)
   [ "$fail" -eq 0 ] && echo "  ✓ $count file(s) parse"
@@ -58,6 +59,16 @@ if [ "$WANT" = "all" ] || [ "$WANT" = "--tests" ]; then
   for suite in apps/web apps/ops; do
     [ -d "$suite/tests" ] || continue
     if (cd "$suite" && node --test tests/) >/tmp/projectx-jstest.out 2>&1; then
+      echo "  ✓ $suite  $(grep -oE '^# pass [0-9]+|ℹ pass [0-9]+' /tmp/projectx-jstest.out | tail -1)"
+    else
+      echo "  ✗ $suite"; sed 's/^/      /' /tmp/projectx-jstest.out | tail -40; fail=1
+    fi
+  done
+  # Services keep their tests beside the code they prove.
+  for suite in services/client-api services/feed-gateway services/mt5-sim; do
+    [ -d "$suite/src" ] || continue
+    [ -n "$(find "$suite/src" -name '*.test.js' -print -quit 2>/dev/null)" ] || continue
+    if (cd "$suite" && node --test src/) >/tmp/projectx-jstest.out 2>&1; then
       echo "  ✓ $suite  $(grep -oE '^# pass [0-9]+|ℹ pass [0-9]+' /tmp/projectx-jstest.out | tail -1)"
     else
       echo "  ✗ $suite"; sed 's/^/      /' /tmp/projectx-jstest.out | tail -40; fail=1

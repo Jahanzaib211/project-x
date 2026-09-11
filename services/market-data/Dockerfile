@@ -23,6 +23,11 @@ RUN cargo build --release --bin market_data -p market-data \
 
 FROM alpine:3.20 AS runtime
 RUN adduser -D -u 10001 app
+
+# The feed log's directory, owned by the user that has to write it — the same
+# arrangement as the ledger's journal, for the same reason (INV-054).
+RUN mkdir -p /var/lib/projectx && chown app:app /var/lib/projectx
+
 COPY --from=builder /build/target/release/market_data /usr/local/bin/service
 COPY --from=builder /build/target/release/healthcheck /usr/local/bin/healthcheck
 USER app

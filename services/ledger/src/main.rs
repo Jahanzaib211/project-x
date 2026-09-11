@@ -13,6 +13,7 @@
 //! Time enters in exactly one place, [`now_tick`], for the same reason it does
 //! in `06-market-data`: everything else is a pure function of the tick.
 
+mod quotes;
 mod state;
 mod volume;
 
@@ -21,7 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use domain_kernel::quantity::Side;
 use market_core::instrument::find;
-use market_core::{quote_at, tick_of};
+use market_core::tick_of;
+use quotes::{QuoteSet, QuoteSource, RemoteSource};
 use service_kit::json::{escape, Value};
 use service_kit::{log, port_from_env, Request, Response, Service, ServiceInfo};
 use state::{Core, CoreError, CreditRecord, OrderRecord};
@@ -265,9 +267,36 @@ fn amount_minor(body: &Value) -> Result<i128, Response> {
 
 /* -------------------------------------------------------------- routing */
 
+/// Which requests need market state. Fetched before the lock is taken, so a
+/// slow feed never holds the ledger, and only where a price is acted on.
+fn needs_quotes(request: &Request, segments: &[&str]) -> bool {
+    matches!(
+        (request.method.as_str(), segments),
+        ("GET", ["v1", "accounts", _, "state"])
+            | ("POST", ["v1", "orders"])
+            | ("POST", ["v1", "positions", "close"])
+            | ("GET", ["v1", "quote"])
+    )
+}
+
 #[allow(clippy::too_many_lines)]
-fn handle(core: &Mutex<Core>, request: &Request, tick: u64) -> Option<Response> {
+fn handle(
+    core: &Mutex<Core>,
+    source: &dyn QuoteSource,
+    request: &Request,
+    tick: u64,
+) -> Option<Response> {
     let segments = request.segments();
+    // Market state for this tick, from `06-market-data`. No state, no fill
+    // and no valuation: the answer is 503 with the reason, never a guess (P7).
+    let quotes = if needs_quotes(request, &segments) {
+        match source.quotes_at(tick) {
+            Ok(quotes) => quotes,
+            Err(detail) => return Some(error(&CoreError::Unavailable(detail))),
+        }
+    } else {
+        QuoteSet::empty()
+    };
     // A poisoned lock means a previous request panicked mid-transaction. The
     // state is still consistent — every mutation here is either complete or not
     // begun — so recovering is better than refusing every request thereafter.
@@ -479,7 +508,7 @@ fn handle(core: &Mutex<Core>, request: &Request, tick: u64) -> Option<Response> 
             None => Some(error(&CoreError::UnknownAccount((*number).to_owned()))),
         },
 
-        ("GET", ["v1", "accounts", number, "state"]) => match core.valuation(number, tick) {
+        ("GET", ["v1", "accounts", number, "state"]) => match core.valuation(number, &quotes) {
             Ok(valuation) => Some(Response::json(
                 200,
                 format!(
@@ -555,7 +584,7 @@ fn handle(core: &Mutex<Core>, request: &Request, tick: u64) -> Option<Response> 
                 }
             };
 
-            match core.place_order(&account, &symbol, side, milli_lots, tick, &key) {
+            match core.place_order(&account, &symbol, side, milli_lots, tick, &quotes, &key) {
                 Ok(record) => Some(Response::json(201, order_json(&record))),
                 Err(CoreError::Refused(reason)) => {
                     // A refusal is a recorded decision, and the client gets the
@@ -594,7 +623,7 @@ fn handle(core: &Mutex<Core>, request: &Request, tick: u64) -> Option<Response> 
                 _ => return Some(bad_request("an Idempotency-Key header is required")),
             };
 
-            match core.close_position(&account, &symbol, tick, &key) {
+            match core.close_position(&account, &symbol, tick, &quotes, &key) {
                 Ok(record) => Some(Response::json(201, order_json(&record))),
                 Err(CoreError::Refused(reason)) => Some(Response::json(
                     422,
@@ -610,23 +639,28 @@ fn handle(core: &Mutex<Core>, request: &Request, tick: u64) -> Option<Response> 
 
         ("GET", ["v1", "quote"]) => {
             // Served so a caller can see the exact price this process would
-            // fill at, from the same pure function it uses (INV-052).
+            // fill at, from the same state it fills on (INV-052).
             let symbol = request.param("symbol").unwrap_or_default();
             let Some(instrument) = find(symbol) else {
                 return Some(error(&CoreError::UnknownInstrument(symbol.to_owned())));
             };
-            match quote_at(instrument, tick) {
-                Ok(quote) => Some(Response::json(
+            match quotes.get(symbol) {
+                Some(quote) => Some(Response::json(
                     200,
                     format!(
-                        r#"{{"symbol":"{}","bid":"{}","ask":"{}","mid":"{}","tick":{tick}}}"#,
+                        r#"{{"symbol":"{}","bid":"{}","ask":"{}","mid":"{}","tick":{},"sessionOpen":{},"ageMs":{}}}"#,
                         escape(instrument.symbol),
                         escape(&instrument.format_price(quote.bid().raw())),
                         escape(&instrument.format_price(quote.ask().raw())),
                         escape(&instrument.format_price(quote.mid().raw())),
+                        quote.tick(),
+                        quote.session_open(),
+                        quote.age_ms(tick),
                     ),
                 )),
-                Err(err) => Some(error(&CoreError::Unavailable(err.to_string()))),
+                None => Some(error(&CoreError::Unavailable(format!(
+                    "no market state for {symbol}"
+                )))),
             }
         }
 
@@ -684,8 +718,12 @@ fn main() -> std::io::Result<()> {
 
     let core = Arc::new(Mutex::new(core));
     let routed = Arc::clone(&core);
+    // Market state comes from 06-market-data, never from a function here.
+    let source: Arc<dyn QuoteSource> = Arc::new(RemoteSource::new(
+        std::env::var("MARKET_DATA_URL").unwrap_or_else(|_| "http://market-data:8000".to_owned()),
+    ));
     service.route_request(Box::new(move |request| {
-        handle(&routed, request, now_tick())
+        handle(&routed, source.as_ref(), request, now_tick())
     }));
 
     log(
@@ -716,11 +754,11 @@ mod tests {
         request
             .headers
             .push(("idempotency-key".to_owned(), "test-key-00000001".to_owned()));
-        handle(core, &request, tick).unwrap()
+        handle(core, &quotes::SyntheticSource, &request, tick).unwrap()
     }
 
     fn get(core: &Mutex<Core>, path: &str, tick: u64) -> Response {
-        handle(core, &Request::get(path), tick).unwrap()
+        handle(core, &quotes::SyntheticSource, &Request::get(path), tick).unwrap()
     }
 
     #[test]
@@ -776,6 +814,7 @@ mod tests {
         let (core, number) = funded();
         let response = handle(
             &core,
+            &quotes::SyntheticSource,
             &Request::post(
                 "/v1/orders",
                 &format!(
@@ -808,7 +847,7 @@ mod tests {
         close
             .headers
             .push(("idempotency-key".to_owned(), "close-key-0001".to_owned()));
-        let closed = handle(&core, &close, 1_526_400).unwrap();
+        let closed = handle(&core, &quotes::SyntheticSource, &close, 1_526_400).unwrap();
         assert_eq!(closed.status, 201);
         assert!(closed.body.contains(r#""side":"SELL""#));
         assert!(closed.body.contains(r#""closedVolume":"1.000""#));
@@ -833,7 +872,7 @@ mod tests {
         close
             .headers
             .push(("idempotency-key".to_owned(), "close-key-0001".to_owned()));
-        let response = handle(&core, &close, 1_526_000).unwrap();
+        let response = handle(&core, &quotes::SyntheticSource, &close, 1_526_000).unwrap();
         assert_eq!(response.status, 422);
         assert!(response.body.contains("NOTHING_TO_CLOSE"));
     }
@@ -867,7 +906,7 @@ mod tests {
         request
             .headers
             .push(("idempotency-key".to_owned(), "too-big-00000001".to_owned()));
-        let response = handle(&core, &request, 1_526_000).unwrap();
+        let response = handle(&core, &quotes::SyntheticSource, &request, 1_526_000).unwrap();
         assert_eq!(response.status, 422);
         assert!(
             response.body.contains("INSUFFICIENT_FREE_MARGIN"),
@@ -971,8 +1010,20 @@ mod tests {
     #[test]
     fn an_unrouted_path_falls_through() {
         let (core, _) = funded();
-        assert!(handle(&core, &Request::get("/v1/nope"), 1).is_none());
-        assert!(handle(&core, &Request::post("/v1/accounts/1", ""), 1).is_none());
+        assert!(handle(
+            &core,
+            &quotes::SyntheticSource,
+            &Request::get("/v1/nope"),
+            1
+        )
+        .is_none());
+        assert!(handle(
+            &core,
+            &quotes::SyntheticSource,
+            &Request::post("/v1/accounts/1", ""),
+            1
+        )
+        .is_none());
     }
 
     fn post_keyed(core: &Mutex<Core>, path: &str, body: &str, key: &str, tick: u64) -> Response {
@@ -980,7 +1031,7 @@ mod tests {
         request
             .headers
             .push(("idempotency-key".to_owned(), key.to_owned()));
-        handle(core, &request, tick).unwrap()
+        handle(core, &quotes::SyntheticSource, &request, tick).unwrap()
     }
 
     /// INV-033 — a real account opens through the same door as a demo one,
@@ -1095,6 +1146,7 @@ mod tests {
 
         let unkeyed = handle(
             &core,
+            &quotes::SyntheticSource,
             &Request::post(
                 &format!("/v1/accounts/{number}/demo-credit"),
                 r#"{"amount":"1.00"}"#,

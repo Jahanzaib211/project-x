@@ -7,19 +7,32 @@
 //!
 //! Exactly here, in one function: [`now_tick`] reads the clock. Everything else
 //! — the price at a tick, the candles over a window, the spread — is a pure
-//! function in `market-core`, so this service is a thin shell around a library
-//! that can be tested without a clock, a socket or a sleep.
+//! function in `market-core` or a lookup in the recorded feed, so this service
+//! is a thin shell around a library that can be tested without a clock, a
+//! socket or a sleep.
 //!
 //! That boundary is the reason a fill can be re-derived from the journal months
 //! later: the journal records the tick, and the tick is all you need.
+//!
+//! ## Two feeds, one state
+//!
+//! The synthetic series is what a fresh install prices on. The recorded feed
+//! is what arrives from providers through the feed gateway (`13-lp-connectivity`)
+//! and is validated into [`state::FeedState`], logged, and served from there.
+//! Which one an instrument is on at any tick is itself recorded, so a quote
+//! for a past tick is the same answer forever (INV-052). See `state.rs`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+mod state;
 
-use market_core::candle::{candles, interval, INTERVALS, MAX_CANDLES};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use market_core::candle::{interval, INTERVALS, MAX_CANDLES};
 use market_core::instrument::{find, INSTRUMENTS};
-use market_core::{quote_at, tick_of, Instrument, Quote, TICK_MS};
-use service_kit::json::escape;
+use market_core::{tick_of, Instrument, Quote, TICK_MS};
+use service_kit::json::{escape, Value};
 use service_kit::{log, port_from_env, Request, Response, Service, ServiceInfo};
+use state::{config_json, AdapterHealth, FeedState, IngestError, KNOWN_SOURCES};
 
 /// The current feed tick.
 ///
@@ -89,14 +102,171 @@ fn error(status: u16, code: &str, detail: &str) -> Response {
     )
 }
 
-fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
+fn bad_request(detail: &str) -> Response {
+    error(400, "bad_request", detail)
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle(state: &Mutex<FeedState>, request: &Request, max_staleness_ms: u64) -> Option<Response> {
+    // A poisoned lock means a request panicked mid-way. Every mutation is
+    // logged before it is applied, so the state is still consistent.
+    let mut feed = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     match request.path.as_str() {
         "/v1/config" => Some(Response::json(
             200,
             format!(
-                r#"{{"max_staleness_ms":{max_staleness_ms},"tick_ms":{TICK_MS},"policy":"reject_stale","invariants":["INV-050","INV-051","INV-052"]}}"#
+                r#"{{"max_staleness_ms":{max_staleness_ms},"tick_ms":{TICK_MS},"policy":"reject_stale","invariants":["INV-050","INV-051","INV-052","INV-053","INV-054"]}}"#
             ),
         )),
+
+        // ------------------------------------------------------ the feed
+        "/v1/feed/ticks" if request.method == "POST" => {
+            let body = match request.json() {
+                Ok(body) => body,
+                Err(err) => return Some(bad_request(&format!("body is not valid JSON: {err}"))),
+            };
+            let Some(source) = body.str_field("source") else {
+                return Some(bad_request("\"source\" is required"));
+            };
+            let Some(Value::Array(ticks)) = body.get("ticks") else {
+                return Some(bad_request("\"ticks\" must be an array"));
+            };
+            let now = now_tick();
+            match feed.ingest(source, ticks, now) {
+                Ok(report) => Some(Response::json(
+                    if report.refused > 0 && report.accepted == 0 && report.out_of_order == 0 {
+                        422
+                    } else {
+                        200
+                    },
+                    format!(
+                        r#"{{"accepted":{},"outOfOrder":{},"duplicates":{},"refused":{},"firstRefusal":{},"tick":{now}}}"#,
+                        report.accepted,
+                        report.out_of_order,
+                        report.duplicates,
+                        report.refused,
+                        report
+                            .first_refusal
+                            .map_or_else(|| "null".to_owned(), |r| format!("\"{}\"", escape(&r))),
+                    ),
+                )),
+                Err(IngestError::Bad(detail)) => Some(bad_request(&detail)),
+                Err(IngestError::NotDurable(detail)) => Some(error(503, "not_durable", &detail)),
+            }
+        }
+
+        "/v1/feed/health" if request.method == "POST" => {
+            // The gateway's view of its providers, kept for the console.
+            let body = match request.json() {
+                Ok(body) => body,
+                Err(err) => return Some(bad_request(&format!("body is not valid JSON: {err}"))),
+            };
+            let Some(Value::Object(adapters)) = body.get("adapters") else {
+                return Some(bad_request("\"adapters\" must be an object"));
+            };
+            let reported_ms = market_core::epoch_ms_of(now_tick());
+            for (name, report) in adapters {
+                if !KNOWN_SOURCES.contains(&name.as_str()) {
+                    continue;
+                }
+                feed.report_adapter(
+                    name,
+                    AdapterHealth {
+                        state: report.str_field("state").unwrap_or("unknown").to_owned(),
+                        last_tick_ms: report.get("lastTickMs").and_then(Value::as_u64),
+                        ticks_per_second: report
+                            .str_field("ticksPerSecond")
+                            .unwrap_or("0")
+                            .to_owned(),
+                        errors: report.get("errors").and_then(Value::as_u64).unwrap_or(0),
+                        detail: report.str_field("detail").unwrap_or("").to_owned(),
+                        reported_ms,
+                    },
+                );
+            }
+            Some(Response::json(200, r#"{"recorded":true}"#))
+        }
+
+        "/v1/feed/config" => Some(Response::json(
+            200,
+            format!(
+                r#"{{"classes":{},"sources":[{}]}}"#,
+                config_json(feed.config()),
+                KNOWN_SOURCES
+                    .iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        )),
+
+        "/v1/feed/source" if request.method == "POST" => {
+            let body = match request.json() {
+                Ok(body) => body,
+                Err(err) => return Some(bad_request(&format!("body is not valid JSON: {err}"))),
+            };
+            let Some(class) = body.str_field("class") else {
+                return Some(bad_request("\"class\" is required"));
+            };
+            let Some(Value::Array(items)) = body.get("sources") else {
+                return Some(bad_request("\"sources\" must be an array of source names"));
+            };
+            let sources: Vec<String> = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            match feed.set_sources(class, sources) {
+                Ok(()) => Some(Response::json(
+                    200,
+                    format!(r#"{{"classes":{}}}"#, config_json(feed.config())),
+                )),
+                Err(detail) => Some(bad_request(&detail)),
+            }
+        }
+
+        "/v1/feed/status" => {
+            let now = now_tick();
+            let instruments = INSTRUMENTS
+                .iter()
+                .map(|instrument| feed.status_of(instrument, now))
+                .collect::<Vec<_>>()
+                .join(",");
+            let adapters = feed
+                .adapters()
+                .iter()
+                .map(|(name, health)| {
+                    format!(
+                        r#""{}":{{"state":"{}","lastTickMs":{},"ticksPerSecond":"{}","errors":{},"detail":"{}","reportedMs":{}}}"#,
+                        escape(name),
+                        escape(&health.state),
+                        health
+                            .last_tick_ms
+                            .map_or_else(|| "null".to_owned(), |v| v.to_string()),
+                        escape(&health.ticks_per_second),
+                        health.errors,
+                        escape(&health.detail),
+                        health.reported_ms
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(Response::json(
+                200,
+                format!(
+                    r#"{{"tick":{now},"nowMs":{},"stateHash":"{:016x}","recorded":{},"outOfOrder":{},"refused":{},"classes":{},"instruments":[{instruments}],"adapters":{{{adapters}}}}}"#,
+                    market_core::epoch_ms_of(now),
+                    feed.store().state_hash(),
+                    feed.store().len(),
+                    feed.store().out_of_order(),
+                    feed.refused(),
+                    config_json(feed.config()),
+                ),
+            ))
+        }
 
         "/v1/instruments" => {
             let now = now_tick();
@@ -152,17 +322,23 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
 
         "/v1/quotes" => {
             let now = now_tick();
+            // A caller may pin the tick: the ledger values every position at
+            // the tick it is deciding on (INV-052).
+            let tick = request
+                .param("tick")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(now);
             let quotes: Vec<String> = INSTRUMENTS
                 .iter()
                 .filter_map(|instrument| {
-                    quote_at(instrument, now)
+                    feed.quote(instrument, tick)
                         .ok()
                         .map(|quote| quote_json(instrument, &quote, now))
                 })
                 .collect();
             Some(Response::json(
                 200,
-                format!(r#"{{"tick":{now},"quotes":[{}]}}"#, quotes.join(",")),
+                format!(r#"{{"tick":{tick},"quotes":[{}]}}"#, quotes.join(",")),
             ))
         }
 
@@ -178,8 +354,13 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
                 .param("tick")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(now);
-            match quote_at(instrument, tick) {
+            match feed.quote(instrument, tick) {
                 Ok(quote) => Some(Response::json(200, quote_json(instrument, &quote, now))),
+                Err(market_core::MarketError::Stale { .. }) => Some(error(
+                    503,
+                    "feed_unavailable",
+                    "the recorded feed holds no usable quote for this tick and the class may not fall back",
+                )),
                 Err(err) => Some(error(500, "quote_unavailable", &err.to_string())),
             }
         }
@@ -199,8 +380,12 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
                 .unwrap_or(200)
                 .clamp(1, MAX_CANDLES);
             let now = now_tick();
+            let tick = request
+                .param("tick")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(now);
 
-            match candles(instrument, chosen, now, count) {
+            match feed.candles(instrument, chosen, tick, count) {
                 Ok(built) => {
                     let rows: Vec<String> = built
                         .iter()
@@ -219,12 +404,16 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
                     Some(Response::json(
                         200,
                         format!(
-                            r#"{{"symbol":"{}","digits":{},"interval":"{}","intervalTicks":{},"tick":{},"candles":[{}]}}"#,
+                            r#"{{"symbol":"{}","digits":{},"interval":"{}","intervalTicks":{},"tick":{},"source":"{}","candles":[{}]}}"#,
                             escape(instrument.symbol),
                             instrument.digits,
                             escape(chosen.label),
                             chosen.ticks,
-                            now,
+                            tick,
+                            escape(&match feed.mode_at(instrument.symbol, tick) {
+                                state::Mode::Synthetic => "synthetic".to_owned(),
+                                state::Mode::Recorded(source) => source,
+                            }),
                             rows.join(",")
                         ),
                     ))
@@ -248,7 +437,64 @@ fn main() -> std::io::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(500);
 
-    service.route_request(Box::new(move |request| handle(request, max_staleness_ms)));
+    let path =
+        std::env::var("FEED_LOG_PATH").unwrap_or_else(|_| "/var/lib/projectx/feed.log".to_owned());
+    let feed = match FeedState::open(std::path::Path::new(&path), now_tick()) {
+        Ok(feed) => feed,
+        Err(detail) => {
+            // A feed that cannot prove what it recorded must not serve
+            // recorded prices as if it could.
+            log(
+                &info,
+                "error",
+                &format!("cannot open feed log at {path}: {detail}"),
+            );
+            return Err(std::io::Error::other(detail));
+        }
+    };
+    log(
+        &info,
+        "info",
+        &format!(
+            "feed log replayed from {path}: {} recorded quotes, state hash {:016x}",
+            feed.store().len(),
+            feed.store().state_hash()
+        ),
+    );
+    let feed = Arc::new(Mutex::new(feed));
+
+    // The watchdog: a recorded feed that goes silent on an open market falls
+    // back to the pure function where the class allows it (see state.rs).
+    let watched = Arc::clone(&feed);
+    let watch_info = info.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let mut guard = match watched.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match guard.watchdog(now_tick()) {
+            Ok(fell_back) => {
+                for symbol in fell_back {
+                    log(
+                        &watch_info,
+                        "warn",
+                        &format!("{symbol}: recorded feed silent, falling back to synthetic"),
+                    );
+                }
+            }
+            Err(detail) => log(
+                &watch_info,
+                "error",
+                &format!("watchdog could not log a fallback: {detail}"),
+            ),
+        }
+    });
+
+    let routed = Arc::clone(&feed);
+    service.route_request(Box::new(move |request| {
+        handle(&routed, request, max_staleness_ms)
+    }));
 
     log(
         &info,
@@ -266,8 +512,16 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
 
+    fn fresh() -> Mutex<FeedState> {
+        Mutex::new(FeedState::in_memory())
+    }
+
     fn body(target: &str) -> String {
-        handle(&Request::get(target), 500).unwrap().body
+        handle(&fresh(), &Request::get(target), 500).unwrap().body
+    }
+
+    fn post(state: &Mutex<FeedState>, target: &str, body: &str) -> Response {
+        handle(state, &Request::post(target, body), 500).unwrap()
     }
 
     #[test]
@@ -307,11 +561,11 @@ mod tests {
 
     #[test]
     fn an_unknown_instrument_is_a_404_not_an_empty_quote() {
-        let response = handle(&Request::get("/v1/quote?symbol=NOTREAL"), 500).unwrap();
+        let response = handle(&fresh(), &Request::get("/v1/quote?symbol=NOTREAL"), 500).unwrap();
         assert_eq!(response.status, 404);
         assert!(response.body.contains("unknown_instrument"));
 
-        let missing = handle(&Request::get("/v1/quote"), 500).unwrap();
+        let missing = handle(&fresh(), &Request::get("/v1/quote"), 500).unwrap();
         assert_eq!(missing.status, 404);
     }
 
@@ -329,7 +583,12 @@ mod tests {
         let json = body("/v1/candles?symbol=EURUSD&interval=1m&limit=100000");
         assert_eq!(json.matches(r#""openTick""#).count(), MAX_CANDLES);
 
-        let response = handle(&Request::get("/v1/candles?symbol=EURUSD&interval=1y"), 500).unwrap();
+        let response = handle(
+            &fresh(),
+            &Request::get("/v1/candles?symbol=EURUSD&interval=1y"),
+            500,
+        )
+        .unwrap();
         assert_eq!(response.status, 404);
         assert!(response.body.contains("unknown_interval"));
     }
@@ -403,6 +662,81 @@ mod tests {
 
     #[test]
     fn an_unknown_path_is_left_for_the_default_handler() {
-        assert!(handle(&Request::get("/nope"), 500).is_none());
+        assert!(handle(&fresh(), &Request::get("/nope"), 500).is_none());
+    }
+
+    /// INV-050 / INV-054 at the HTTP surface: a batch is validated, the
+    /// accepted quotes are served, the status reports the switch, and the
+    /// console can reconfigure the class.
+    #[test]
+    fn inv_050_the_ingest_endpoint_validates_and_the_status_reports_it() {
+        let state = fresh();
+        let now_ms = market_core::epoch_ms_of(now_tick());
+        let response = post(
+            &state,
+            "/v1/feed/ticks",
+            &format!(
+                r#"{{"source":"binance","ticks":[{{"symbol":"BTCUSD","ms":{now_ms},"seq":1,"bid":"68200.10","ask":"68201.30"}},{{"symbol":"BTCUSD","ms":{now_ms},"seq":2,"bid":"9","ask":"1"}}]}}"#
+            ),
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(response.body.contains(r#""accepted":1"#));
+        assert!(response.body.contains(r#""refused":1"#));
+
+        let quote = handle(&state, &Request::get("/v1/quote?symbol=BTCUSD"), 500).unwrap();
+        assert!(quote.body.contains(r#""bid":"68200.10""#), "{}", quote.body);
+
+        let status = handle(&state, &Request::get("/v1/feed/status"), 500).unwrap();
+        assert!(
+            status.body.contains(
+                r#""symbol":"BTCUSD","class":"Crypto","mode":"recorded","source":"binance""#
+            ),
+            "{}",
+            status.body
+        );
+        assert!(status.body.contains(r#""recorded":1"#));
+
+        let all_bad = post(
+            &state,
+            "/v1/feed/ticks",
+            &format!(
+                r#"{{"source":"binance","ticks":[{{"symbol":"BTCUSD","ms":{now_ms},"seq":3,"bid":"9","ask":"1"}}]}}"#
+            ),
+        );
+        assert_eq!(all_bad.status, 422);
+        assert_eq!(
+            post(&state, "/v1/feed/ticks", r#"{"source":"nasa","ticks":[]}"#).status,
+            400
+        );
+        assert_eq!(post(&state, "/v1/feed/ticks", "nonsense").status, 400);
+
+        let reconfigured = post(
+            &state,
+            "/v1/feed/source",
+            r#"{"class":"Crypto","sources":["synthetic"]}"#,
+        );
+        assert_eq!(reconfigured.status, 200, "{}", reconfigured.body);
+        assert!(reconfigured.body.contains(r#""Crypto":["synthetic"]"#));
+        assert_eq!(
+            post(
+                &state,
+                "/v1/feed/source",
+                r#"{"class":"Crypto","sources":["nasa"]}"#
+            )
+            .status,
+            400
+        );
+        let config = handle(&state, &Request::get("/v1/feed/config"), 500).unwrap();
+        assert!(config.body.contains(r#""sources":["synthetic","binance""#));
+
+        let health = post(
+            &state,
+            "/v1/feed/health",
+            r#"{"adapters":{"binance":{"state":"connected","lastTickMs":1,"ticksPerSecond":"3.2","errors":0,"detail":"ok"},"nasa":{"state":"x"}}}"#,
+        );
+        assert_eq!(health.status, 200);
+        let status = handle(&state, &Request::get("/v1/feed/status"), 500).unwrap();
+        assert!(status.body.contains(r#""binance":{"state":"connected""#));
+        assert!(!status.body.contains("nasa"));
     }
 }

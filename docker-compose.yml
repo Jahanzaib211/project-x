@@ -37,6 +37,9 @@ x-core-env: &core-env
   BASE_CURRENCY: ${BASE_CURRENCY:-USD}
   MAX_QUOTE_STALENESS_MS: ${MAX_QUOTE_STALENESS_MS:-500}
   RISK_FAIL_MODE: ${RISK_FAIL_MODE:-closed}
+  # Every price-dependent service reads market state from 06-market-data and
+  # nothing else (INV-052). The address is the compose service name.
+  MARKET_DATA_URL: ${MARKET_DATA_URL:-http://market-data:8000}
 
 networks:
   projectx:
@@ -46,6 +49,7 @@ networks:
 volumes:
   postgres_data:   { name: projectx_postgres_data }
   ledger_data:     { name: projectx_ledger_data }
+  feed_data:       { name: projectx_feed_data }
   redpanda_data:   { name: projectx_redpanda_data }
   redis_data:      { name: projectx_redis_data }
   clickhouse_data: { name: projectx_clickhouse_data }
@@ -261,6 +265,7 @@ services:
     volumes:
       - ledger_data:/var/lib/projectx
     depends_on:
+      market-data: { condition: service_healthy }
       postgres: { condition: service_healthy }
       redpanda: { condition: service_healthy }
     healthcheck:
@@ -287,6 +292,11 @@ services:
       MODULE_ID: 06-market-data
       SERVICE_TIER: T1
     ports: ["${HOST_BIND:-127.0.0.1}:${PORT_MARKET_DATA:-27003}:8000"]
+    # The recorded feed is append-only and is what makes a real price
+    # reproducible (INV-054). It lives on a named volume for the same reason
+    # the ledger's journal does.
+    volumes:
+      - feed_data:/var/lib/projectx
     depends_on:
       redpanda: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -294,6 +304,37 @@ services:
       test: ["CMD", "/usr/local/bin/healthcheck"]
       interval: 10s
       timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # 13-lp-connectivity — provider feeds behind one adapter interface. Reads
+  # its source order from market-data and pushes validated ticks back to it.
+  # No price lives here; a tick it does not forward is gone, by design.
+  feed-gateway:
+    build:
+      context: ./services/feed-gateway
+      dockerfile: Dockerfile
+    image: projectx/feed-gateway:dev
+    container_name: projectx-feed-gateway
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${ENVIRONMENT:-development}
+      PORT: 8000
+      MARKET_DATA_URL: ${MARKET_DATA_URL:-http://market-data:8000}
+      MT5_BRIDGE_URL: ${MT5_BRIDGE_URL:-http://mt5-sim:8000}
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
+      SIM_LP: ${SIM_LP:-0}
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_FEED_GATEWAY:-27021}:8000"]
+    depends_on:
+      market-data: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
       retries: 5
       start_period: 10s
     networks: [projectx]

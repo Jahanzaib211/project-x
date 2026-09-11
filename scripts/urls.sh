@@ -10,6 +10,8 @@ printf '    %-20s http://%s:%s/health\n' "Ledger"     "$B" "${PORT_LEDGER:-27002
 printf '    %-20s http://%s:%s/health\n' "Market data" "$B" "${PORT_MARKET_DATA:-27003}"
 printf '    %-20s http://%s:%s/health\n' "Pricing"    "$B" "${PORT_PRICING:-27004}"
 printf '    %-20s http://%s:%s/health\n' "OMS"        "$B" "${PORT_OMS:-27005}"
+printf '    %-20s http://%s:%s/v1/adapters\n' "Feed gateway" "$B" "${PORT_FEED_GATEWAY:-27021}"
+printf '    %-20s http://%s:%s/health\n' "MT5 simulator" "$B" "${PORT_MT5_SIM:-27022}"
 printf '    %-20s http://%s:%s\n' "Bus console"       "$B" "${PORT_REDPANDA_CONSOLE:-27006}"
 printf '    %-20s http://%s:%s\n' "Grafana"           "$B" "${PORT_GRAFANA:-27014}"
 printf '    %-20s http://%s:%s\n' "Prometheus"        "$B" "${PORT_PROMETHEUS:-27013}"

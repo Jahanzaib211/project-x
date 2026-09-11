@@ -32,13 +32,13 @@ use domain_kernel::{AnyMoney, Money, Price, Quantity, Usd};
 use event_kernel::Id;
 use execution_core::{execute, Deal, DealIds, ExecutionError};
 use ledger_core::{client_cash, AccountId, Balances, Entry, Journal, Transaction, TransactionKind};
-use market_core::instrument::{find, Instrument};
-use market_core::quote_at;
-use pnl_margin::{value_account, Marks, Valuation, POLICY};
+use market_core::instrument::find;
+use pnl_margin::{value_account, Valuation, POLICY};
 use position_core::{Book, Fill};
 use risk_core::{assess, Decision, OrderIntent, Rejection};
 use service_kit::json::{escape, Value};
 
+use crate::quotes::QuoteSet;
 use crate::volume;
 
 /// Why an operation on the core failed.
@@ -117,25 +117,6 @@ impl CoreError {
             Self::Execution(_) => 409,
             Self::Unavailable(_) | Self::NotDurable(_) => 503,
         }
-    }
-}
-
-/// Market state as this process reads it: pure, addressed by tick.
-struct TickMarks {
-    tick: u64,
-}
-
-impl Marks for TickMarks {
-    fn mark(&self, symbol: &str) -> Option<Price<Usd>> {
-        // Positions are marked at the mid, not at the side they would close on.
-        // Marking at the closing side would show a client a loss equal to the
-        // spread the instant a position opens, which is true of the exit but not
-        // of the holding — and the two are different questions.
-        find(symbol).and_then(|instrument| quote_at(instrument, self.tick).ok().map(|q| q.mid()))
-    }
-
-    fn instrument(&self, symbol: &str) -> Option<&'static Instrument> {
-        find(symbol)
     }
 }
 
@@ -357,13 +338,13 @@ impl Core {
     /// [`CoreError`] if the account is unknown or cannot be valued. Failing
     /// rather than guessing is the point: an equity figure that quietly omitted
     /// a position would be worse than no figure at all (INV-183).
-    pub fn valuation(&self, account: &str, tick: u64) -> Result<Valuation, CoreError> {
+    pub fn valuation(&self, account: &str, quotes: &QuoteSet) -> Result<Valuation, CoreError> {
         if self.account(account).is_none() {
             return Err(CoreError::UnknownAccount(account.to_owned()));
         }
         let balance = self.balance_of(account).unwrap_or_else(Money::zero);
         let positions = self.book.for_account(account);
-        value_account(balance, &positions, &TickMarks { tick }, &POLICY)
+        value_account(balance, &positions, quotes, &POLICY)
             .map_err(|err| CoreError::Unavailable(err.to_string()))
     }
 
@@ -530,6 +511,7 @@ impl Core {
     /// # Errors
     /// [`CoreError`] with the specific reason. A refusal is a normal outcome and
     /// is recorded (INV-082) rather than discarded.
+    #[allow(clippy::too_many_arguments)]
     pub fn place_order(
         &mut self,
         account_number: &str,
@@ -537,6 +519,7 @@ impl Core {
         side: Side,
         milli_lots: i128,
         tick: u64,
+        quotes: &QuoteSet,
         client_key: &str,
     ) -> Result<OrderRecord, CoreError> {
         // INV-181 — a retry returns the first outcome, it does not place a
@@ -554,10 +537,14 @@ impl Core {
 
         let quantity = volume::to_quantity(milli_lots, instrument)
             .map_err(|err| CoreError::BadRequest(err.to_string()))?;
-        let quote =
-            quote_at(instrument, tick).map_err(|err| CoreError::Unavailable(err.to_string()))?;
+        // The state handed in for this tick, or nothing: the ledger never
+        // prices an instrument itself (P7 — no state, no fill).
+        let quote = quotes
+            .get(symbol)
+            .copied()
+            .ok_or_else(|| CoreError::Unavailable(format!("no market state for {symbol}")))?;
         let fill_price = quote.fill_price(side);
-        let valuation = self.valuation(account_number, tick)?;
+        let valuation = self.valuation(account_number, quotes)?;
 
         let intent = OrderIntent {
             account: account_number,
@@ -566,7 +553,8 @@ impl Core {
             quantity,
             price: fill_price,
             tick,
-            market_age_ms: 0,
+            // INV-051/INV-062 — a recorded quote carries its real age.
+            market_age_ms: quote.age_ms(tick),
             // INV-032, asked once, here, rather than re-tested in three places.
             account_tradable: account.may_originate(),
             // INV-084 — the quote knows whether it is live or frozen.
@@ -645,6 +633,7 @@ impl Core {
         account_number: &str,
         symbol: &str,
         tick: u64,
+        quotes: &QuoteSet,
         client_key: &str,
     ) -> Result<OrderRecord, CoreError> {
         let instrument =
@@ -667,7 +656,15 @@ impl Core {
         if milli <= 0 {
             return Err(CoreError::NothingToClose);
         }
-        self.place_order(account_number, symbol, side, milli, tick, client_key)
+        self.place_order(
+            account_number,
+            symbol,
+            side,
+            milli,
+            tick,
+            quotes,
+            client_key,
+        )
     }
 
     /// Take the next deterministic id.
@@ -994,7 +991,7 @@ mod tests {
     /// A summary of everything a client could observe, so two cores can be
     /// compared as wholes rather than field by field.
     fn fingerprint(core: &Core, account: &str, tick: u64) -> String {
-        let valuation = core.valuation(account, tick).unwrap();
+        let valuation = core.valuation(account, &QuoteSet::synthetic(tick)).unwrap();
         let positions: Vec<String> = core
             .book
             .for_account(account)
@@ -1034,6 +1031,7 @@ mod tests {
             Side::Buy,
             1_000,
             1_526_000,
+            &QuoteSet::synthetic(1_526_000),
             "key-open-0001",
         )
         .unwrap();
@@ -1043,6 +1041,7 @@ mod tests {
             Side::Sell,
             100,
             1_526_100,
+            &QuoteSet::synthetic(1_526_100),
             "key-open-0002",
         )
         .unwrap();
@@ -1054,6 +1053,7 @@ mod tests {
             Side::Sell,
             500,
             1_526_200,
+            &QuoteSet::synthetic(1_526_200),
             "key-part-0003",
         )
         .unwrap();
@@ -1142,6 +1142,7 @@ mod tests {
                 Side::Buy,
                 100,
                 1_526_400,
+                &QuoteSet::synthetic(1_526_400),
                 "key-after-0001",
             )
             .unwrap();
@@ -1172,6 +1173,7 @@ mod tests {
             Side::Buy,
             100,
             1_526_000,
+            &QuoteSet::synthetic(1_526_000),
             "key-x-0001",
         )
         .unwrap();
@@ -1198,6 +1200,7 @@ mod tests {
             Side::Buy,
             49_000,
             1_526_000,
+            &QuoteSet::synthetic(1_526_000),
             "key-refused-01",
         );
         assert!(matches!(refused, Err(CoreError::Refused(_))));
@@ -1233,13 +1236,20 @@ mod tests {
                 Side::Buy,
                 1_000,
                 2_476_800,
+                &QuoteSet::synthetic(2_476_800),
                 "open-key-0001",
             )
             .unwrap();
         let open_deal = opened.deal.unwrap();
 
         let closed = core
-            .close_position(&account, "EURUSD", 2_477_200, "close-key-0001")
+            .close_position(
+                &account,
+                "EURUSD",
+                2_477_200,
+                &QuoteSet::synthetic(2_477_200),
+                "close-key-0001",
+            )
             .unwrap();
         let close_deal = closed.deal.unwrap();
 
