@@ -50,6 +50,7 @@ volumes:
   postgres_data:   { name: projectx_postgres_data }
   ledger_data:     { name: projectx_ledger_data }
   feed_data:       { name: projectx_feed_data }
+  mt5_data:        { name: projectx_mt5_data }
   redpanda_data:   { name: projectx_redpanda_data }
   redis_data:      { name: projectx_redis_data }
   clickhouse_data: { name: projectx_clickhouse_data }
@@ -340,6 +341,53 @@ services:
     networks: [projectx]
     <<: *logging
 
+  # 21-external — the simulated MT5 bridge. What the feed gateway's mt5
+  # adapter and the reconciler talk to on a machine with no MT5 login, and in
+  # CI. Speaks the same protocol as the real bridge below.
+  mt5-sim:
+    build:
+      context: ./services/mt5-sim
+      dockerfile: Dockerfile
+    image: projectx/mt5-sim:dev
+    container_name: projectx-mt5-sim
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${ENVIRONMENT:-development}
+      PORT: 8000
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_MT5_SIM:-27022}:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks: [projectx]
+    <<: *logging
+
+  # 21-external — the real MT5 bridge: a MetaTrader 5 terminal under Wine,
+  # fronted by bridge.py. Its own profile: large, needs a display server, and
+  # holds a trading login. Point MT5_BRIDGE_URL at it to use it.
+  mt5-bridge:
+    build:
+      context: ./services/mt5-bridge
+      dockerfile: Dockerfile
+    image: projectx/mt5-bridge:dev
+    container_name: projectx-mt5-bridge
+    profiles: [external]
+    restart: unless-stopped
+    environment:
+      PORT: 8000
+      MT5_LOGIN: ${MT5_LOGIN:-}
+      MT5_PASSWORD: ${MT5_PASSWORD:-}
+      MT5_SERVER: ${MT5_SERVER:-}
+      MT5_TERMINAL_PATH: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_MT5_BRIDGE:-27023}:8000"]
+    volumes:
+      - mt5_data:/home/app/.wine/drive_c/Program Files/MetaTrader 5
+    networks: [projectx]
+    <<: *logging
+
   # 07-pricing — pure function: (MarketState, config) -> ClientQuote.
   pricing:
     build:
@@ -422,6 +470,8 @@ services:
       OMS_URL: ${OMS_URL}
       PRICING_URL: ${PRICING_URL}
       MARKET_DATA_URL: ${MARKET_DATA_URL}
+      FEED_GATEWAY_URL: ${FEED_GATEWAY_URL:-http://feed-gateway:8000}
+      MT5_BRIDGE_URL: ${MT5_BRIDGE_URL:-http://mt5-sim:8000}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
       # Identity. The two role passwords are what the least-privilege database
       # roles are created with; the service refuses to start in production while

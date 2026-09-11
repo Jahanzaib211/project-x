@@ -28,6 +28,7 @@ import {
 } from "./db.js";
 import { delivery, startOutboxWorker } from "./mailer.js";
 import * as admin from "./admin.js";
+import * as external from "./external.js";
 import { HttpError, requireAmount } from "./money.js";
 import { forward, upstream, UPSTREAM } from "./core.js";
 
@@ -838,6 +839,32 @@ async function routeAdmin(req, res, path, method, url) {
     return send(res, 200, await admin.isolation());
   }
 
+  // ------------------------------------------------------ 21-external
+  if (path === "/v1/admin/external" && method === "GET") {
+    return send(res, 200, await reconciler.status());
+  }
+  if (path === "/v1/admin/external/map" && method === "POST") {
+    const body = /** @type {Record<string, unknown>} */ (await readBody(req));
+    const account = String(body.ledgerAccount ?? "");
+    if (!/^\d{6,12}$/.test(account)) throw new HttpError(400, "ledgerAccount must be a trading account number");
+    try {
+      const mapped = await external.map(account, operator);
+      log("warn", "operator mapped the platform login to a ledger account", { operator, account });
+      return send(res, 200, { mapping: mapped });
+    } catch (error) {
+      throw new HttpError(422, String(error instanceof Error ? error.message : error));
+    }
+  }
+  if (path === "/v1/admin/external/unmap" && method === "POST") {
+    await external.unmap();
+    log("warn", "operator removed the platform mapping", { operator });
+    return send(res, 200, { mapping: null });
+  }
+  if (path === "/v1/admin/external/cycle" && method === "POST") {
+    await reconciler.cycle();
+    return send(res, 200, await reconciler.status());
+  }
+
   return send(res, 404, { error: "not_found", path });
 }
 
@@ -1302,6 +1329,13 @@ function send(res, status, body) {
 /** @type {() => void} */
 let stopOutboxWorker = () => {};
 
+/**
+ * The bridge reconciler (21-external). Created here so its timer exists for
+ * the life of the process; it does nothing until the bridge is reachable and
+ * a mapping exists.
+ */
+const reconciler = external.createReconciler({ log });
+
 const server = http.createServer((req, res) => {
   route(req, res).catch((error) => {
     if (error instanceof HttpError) {
@@ -1436,6 +1470,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     log("info", `${signal} received, draining`);
     stopOutboxWorker();
+    reconciler.stop();
     server.close(async () => { await closeDb().catch(() => {}); process.exit(0); });
   });
 }

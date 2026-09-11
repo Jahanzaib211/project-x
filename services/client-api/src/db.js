@@ -459,6 +459,76 @@ export async function migrate() {
         ON app.security_events (user_id, at DESC)
     `);
 
+    // ----------------------------------------------------- 21-external
+    // The bridge to an external platform (MT5). Mapping tables and the
+    // reconciliation record. Operator data: no client role has any grant on
+    // these, and they are read and written only by the reconciler and the
+    // admin surface (INV-200 — the platform is never the source of truth,
+    // and nothing here is a balance).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app.external_accounts (
+        platform        TEXT        NOT NULL,
+        platform_login  TEXT        NOT NULL,
+        ledger_account  BIGINT      NOT NULL,
+        mapped_by       TEXT        NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (platform, platform_login)
+      )
+    `);
+
+    // Every action the reconciler took on the platform, with the core's
+    // reason for it. Append-only.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app.external_actions (
+        action_id       BIGSERIAL   PRIMARY KEY,
+        platform        TEXT        NOT NULL,
+        ledger_account  BIGINT      NOT NULL,
+        symbol          TEXT        NOT NULL,
+        kind            TEXT        NOT NULL CHECK (kind IN ('mirror_open','mirror_close','platform_deal')),
+        side            TEXT        NOT NULL CHECK (side IN ('BUY','SELL')),
+        volume          TEXT        NOT NULL,
+        reference       TEXT        NOT NULL,
+        outcome         TEXT        NOT NULL,
+        detail          TEXT,
+        at              TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    // A platform deal that has been carried into the core through the OMS.
+    // The ticket is the primary key: a deal is applied exactly once (INV-122).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app.external_deals (
+        platform        TEXT        NOT NULL,
+        ticket          BIGINT      NOT NULL,
+        ledger_account  BIGINT      NOT NULL,
+        order_id        TEXT,
+        outcome         TEXT        NOT NULL,
+        at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (platform, ticket)
+      )
+    `);
+
+    // Divergence between the platform and the core (INV-201). Opened by the
+    // reconciler, resolved by it when the two agree again; never deleted.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app.external_breaks (
+        break_id        BIGSERIAL   PRIMARY KEY,
+        platform        TEXT        NOT NULL,
+        kind            TEXT        NOT NULL,
+        symbol          TEXT,
+        ledger_value    TEXT,
+        platform_value  TEXT,
+        detail          TEXT,
+        opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        resolved_at     TIMESTAMPTZ
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS external_breaks_open_idx
+        ON app.external_breaks (platform, kind, symbol) WHERE resolved_at IS NULL
+    `);
+
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -537,6 +607,9 @@ async function applyIsolation() {
     for (const table of [
       "accounts", "funding_requests", "users", "sessions",
       "recovery_codes", "one_time_tokens", "outbox", "security_events",
+      // Operator-only: row-level security on, forced, and no policy for any
+      // serving role — so the serving roles see nothing at all.
+      "external_accounts", "external_actions", "external_deals", "external_breaks",
     ]) {
       await client.query(`ALTER TABLE app.${table} ENABLE ROW LEVEL SECURITY`);
       // FORCE, so the owning role is subject to its own policies too. Without

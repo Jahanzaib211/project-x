@@ -1,0 +1,20 @@
+{
+  "name": "@projectx/mt5-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "21-external — a simulated MT5 bridge speaking the Project X bridge protocol. For CI and local runs; carries no real price.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}
