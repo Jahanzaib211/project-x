@@ -36,6 +36,7 @@ RUN addgroup -S app && adduser -S -u 10001 -G app app
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
+COPY vendor ./vendor
 USER app
 ENV NODE_ENV=production PORT=3000
 EXPOSE 3000

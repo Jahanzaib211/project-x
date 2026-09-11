@@ -177,6 +177,11 @@ test("the simulator's faults are real: duplicates, reordering, crossed quotes, a
 test("the mt5 adapter consumes a bridge event stream and reconnects when it ends", async () => {
   let connections = 0;
   const server = http.createServer((req, res) => {
+    if (String(req.url) === "/v1/state") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ state: "connected", simulated: false }));
+      return;
+    }
     connections += 1;
     assert.match(String(req.url), /^\/v1\/ticks\?symbols=/);
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -200,4 +205,36 @@ test("the mt5 adapter consumes a bridge event stream and reconnects when it ends
   adapter.stop();
   server.close();
   assert.ok(connections >= 1);
+});
+
+test("a simulated bridge is not a price source unless explicitly allowed", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": String(req.url) === "/v1/state" ? "application/json" : "text/event-stream" });
+    if (String(req.url) === "/v1/state") return res.end(JSON.stringify({ state: "connected", simulated: true }));
+    res.write('data: {"symbol":"EURUSD","bid":"1.08500","ask":"1.08520"}\n\n');
+    return setTimeout(() => res.end(), 10);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(null)));
+  const address = /** @type {import("node:net").AddressInfo} */ (server.address());
+  process.env.MT5_BRIDGE_URL = `http://127.0.0.1:${address.port}`;
+  delete process.env.MT5_ALLOW_SIMULATED;
+  const refused = new Mt5Adapter();
+  /** @type {import("./base.js").Tick[]} */
+  const none = [];
+  refused.start(["EURUSD"], (t) => none.push(t));
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(refused.state, "unconfigured");
+  assert.equal(none.length, 0);
+  refused.stop();
+
+  process.env.MT5_ALLOW_SIMULATED = "1";
+  const allowed = new Mt5Adapter();
+  /** @type {import("./base.js").Tick[]} */
+  const got = [];
+  allowed.start(["EURUSD"], (t) => got.push(t));
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(got.length, 1);
+  allowed.stop();
+  delete process.env.MT5_ALLOW_SIMULATED;
+  server.close();
 });

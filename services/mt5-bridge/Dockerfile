@@ -22,6 +22,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WINEPREFIX=/home/app/.wine \
     WINEARCH=win64 \
     WINEDEBUG=-all \
+    # No Mono, no Gecko: neither is needed, and their installers are dialogs
+    # that wait forever for a click nobody can give under Xvfb.
+    WINEDLLOVERRIDES="mscoree=d;mshtml=d" \
     PORT=8000
 
 RUN dpkg --add-architecture i386 \
@@ -39,8 +42,9 @@ USER app
 WORKDIR /home/app
 
 # A 64-bit prefix, Windows Python, and the package. `wineboot` initialises the
-# prefix; the Python installer is silent; pip runs under Wine.
-RUN xvfb-run -a wineboot --init \
+# prefix headless (it needs no display for that); the Python installer is
+# silent; pip runs under Wine.
+RUN wineboot --init && wineserver -w \
  && curl -fsSL https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe -o /tmp/python.exe \
  && xvfb-run -a wine /tmp/python.exe /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 TargetDir='C:\Python311' \
  && rm /tmp/python.exe \

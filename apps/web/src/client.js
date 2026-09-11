@@ -751,6 +751,9 @@ async function loadCandles(root) {
   const host = $("[data-chart-host]", root);
   const canvas = /** @type {HTMLCanvasElement|null} */ ($("[data-chart]", root));
   if (!host || !canvas) return;
+  // The chart suite (chart.js) owns the history when it is running; the
+  // canvas is the fallback for when it is not.
+  if (host.classList.contains("suite-active")) return;
   try {
     const data = await api(
       `/v1/candles?symbol=${encodeURIComponent(chart.symbol)}&interval=${encodeURIComponent(chart.interval)}&limit=180`,
@@ -847,6 +850,21 @@ function applySession(root, session) {
 async function refreshQuote(root) {
   try {
     const quote = await api(`/v1/quote?symbol=${encodeURIComponent(chart.symbol)}`);
+    renderQuote(root, quote);
+  } catch {
+    // A dropped poll is not worth a toast; the next one is 800ms away.
+  }
+}
+
+/**
+ * Render one quote, wherever it came from — a poll or the event stream.
+ * @param {HTMLElement} root
+ * @param {{symbol: string, bid: string, ask: string, ageMs?: number,
+ *          session?: {open: boolean, nextTransitionMs: number|null, hours?: string}}} quote
+ */
+function renderQuote(root, quote) {
+  if (!quote || quote.symbol !== chart.symbol) return;
+  {
     applySession(root, quote.session);
     setPrice($("[data-bid]", root), quote.bid);
     setPrice($("[data-ask]", root), quote.ask);
@@ -868,8 +886,6 @@ async function refreshQuote(root) {
         ? "frozen"
         : `${quote.ageMs ?? 0} ms`;
     }
-  } catch {
-    // A dropped poll is not worth a toast; the next one is 800ms away.
   }
 }
 
@@ -1197,12 +1213,26 @@ function initTerminal() {
   void refreshQuote(root);
   void refreshAccount(root);
 
-  // Quotes move every 250ms at the source; polling faster than that only makes
-  // work. The candle history is refetched less often — the growing candle is
-  // what changes, and a whole window every second is wasteful.
-  setInterval(() => void refreshQuote(root), 800);
-  setInterval(() => void loadCandles(root), 3000);
-  setInterval(() => void refreshAccount(root), 2000);
+  // With the event stream live (chart.js opens it), every figure arrives as
+  // it changes and these loops are only a safety net that runs slowly. Without
+  // it — scripting partially failed, an old browser — they do the work:
+  // quotes move every 250ms at the source, polling faster only makes work.
+  const streamLive = () => document.documentElement.dataset.stream === "live";
+  setInterval(() => { if (!streamLive()) void refreshQuote(root); }, 800);
+  setInterval(() => { if (!streamLive()) void loadCandles(root); }, 3000);
+  setInterval(() => { if (!streamLive()) void refreshAccount(root); }, 2000);
+  setInterval(() => { if (streamLive()) void refreshAccount(root); }, 15_000);
+
+  document.addEventListener("px:stream", (event) => {
+    const { event: name, data } = /** @type {CustomEvent<{event: string, data: Record<string, unknown>}>} */ (event).detail;
+    if (name === "quote") renderQuote(root, /** @type {Parameters<typeof renderQuote>[1]} */ (/** @type {unknown} */ (data)));
+    if (name === "account" && String(data.accountNumber) === root.dataset.account) {
+      const valuation = /** @type {{positions?: never[]} & Record<string, string|null|undefined>} */ (data.valuation);
+      renderSummary(root, valuation);
+      renderPositions(root, /** @type {never[]} */ (valuation?.positions ?? []));
+    }
+    if (name === "orders") renderOrders(root, /** @type {never[]} */ (data.orders ?? []));
+  });
 
   if (canvas) {
     globalThis.addEventListener("resize", () => drawChart(canvas));

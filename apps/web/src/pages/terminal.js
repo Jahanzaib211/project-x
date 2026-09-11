@@ -47,7 +47,36 @@ import { icon } from "../ui/icons.js";
  */
 
 /** The chart intervals offered, shortest first. */
-const INTERVALS = ["5s", "15s", "1m", "5m", "15m", "1h"];
+const INTERVALS = ["5s", "15s", "1m", "5m", "15m", "1h", "4h", "1d"];
+
+/** Chart types the suite offers, in the library's own names. */
+const CHART_TYPES = [
+  ["candle_solid", "Candles"],
+  ["candle_stroke", "Hollow"],
+  ["ohlc", "OHLC"],
+  ["area", "Area"],
+];
+
+/** Indicators drawn on the price pane and below it. */
+const OVERLAY_INDICATORS = ["MA", "EMA", "BOLL", "SAR"];
+// No VOL: the feeds carry prices, not traded volume, and a flat zero pane
+// would be a chart claiming something it does not know.
+const PANE_INDICATORS = ["MACD", "RSI", "KDJ", "ATR", "CCI", "WR"];
+
+/** Drawing tools, in the library's overlay names. */
+const DRAWINGS = [
+  ["segment", "Trend line"],
+  ["straightLine", "Line"],
+  ["horizontalStraightLine", "Horizontal"],
+  ["verticalStraightLine", "Vertical"],
+  ["rayLine", "Ray"],
+  ["priceLine", "Price line"],
+  ["priceChannelLine", "Channel"],
+  ["fibonacciLine", "Fibonacci"],
+  ["rect", "Rectangle"],
+  ["circle", "Circle"],
+  ["text", "Text"],
+];
 
 /**
  * A figure the core supplied, or an explicit dash.
@@ -100,7 +129,7 @@ function symbolOptions(instruments, symbol) {
   return instruments
     .map(
       (instrument) =>
-        `<option value="${esc(instrument.symbol)}" data-hours="${esc(instrument.sessionHours ?? "")}"${instrument.symbol === symbol ? " selected" : ""}>${esc(
+        `<option value="${esc(instrument.symbol)}" data-hours="${esc(instrument.sessionHours ?? "")}" data-digits="${instrument.digits}"${instrument.symbol === symbol ? " selected" : ""}>${esc(
           instrument.symbol,
         )} — ${esc(instrument.name)}${instrument.session && !instrument.session.open ? " (closed)" : ""}</option>`,
     )
@@ -305,6 +334,42 @@ export function terminalPage({
           </div>
         </header>
 
+        <!-- The chart suite's toolbar. Every control is a plain element the
+             chart module wires; with scripting off the canvas fallback below
+             still shows the history. -->
+        <div class="chart-tools" data-chart-tools>
+          <label class="sr-only" for="chart-type">Chart type</label>
+          <select class="select select-sm" id="chart-type" data-chart-type>
+            ${CHART_TYPES.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}
+          </select>
+          <div class="has-menu">
+            <button class="btn btn-ghost btn-sm" type="button" data-menu="indicators" aria-expanded="false" aria-haspopup="true">
+              Indicators <span class="chev">${icon.chevronDown(14)}</span>
+            </button>
+            <div class="menu" data-menu-panel="indicators" hidden>
+              <div class="menu-heading">On the price</div>
+              ${OVERLAY_INDICATORS.map((name) => `<label class="menu-item"><input type="checkbox" data-indicator="${esc(name)}" data-pane="candle_pane"> ${esc(name)}</label>`).join("")}
+              <div class="menu-sep"></div>
+              <div class="menu-heading">Below</div>
+              ${PANE_INDICATORS.map((name) => `<label class="menu-item"><input type="checkbox" data-indicator="${esc(name)}"> ${esc(name)}</label>`).join("")}
+            </div>
+          </div>
+          <div class="has-menu">
+            <button class="btn btn-ghost btn-sm" type="button" data-menu="drawings" aria-expanded="false" aria-haspopup="true">
+              Draw <span class="chev">${icon.chevronDown(14)}</span>
+            </button>
+            <div class="menu" data-menu-panel="drawings" hidden>
+              ${DRAWINGS.map(([value, label]) => `<button class="menu-item" type="button" data-drawing="${esc(value)}">${esc(label)}</button>`).join("")}
+              <div class="menu-sep"></div>
+              <button class="menu-item" type="button" data-drawing-clear>Clear drawings</button>
+            </div>
+          </div>
+          <label class="chart-toggle small"><input type="checkbox" data-show-positions checked> Positions</label>
+          <span class="grow"></span>
+          <span class="micro muted" data-chart-source></span>
+          <span class="micro muted" data-chart-live>live: connecting…</span>
+        </div>
+
         <div class="session-banner" data-session-banner data-open="${closed ? "false" : "true"}"${closed ? "" : " hidden"} role="status" aria-live="polite">
           <span class="badge badge-warning">Market closed</span>
           <span data-session-text>${closed
@@ -322,6 +387,9 @@ export function terminalPage({
           one in a screenshot, and these make the difference assertable.
         -->
         <div class="chart-host" data-chart-host data-candles="0" data-last="">
+          <!-- The chart suite mounts here. The canvas beneath is the no-script
+               fallback, drawn by client.js when the suite is not running. -->
+          <div class="chart-suite" data-chart-suite hidden></div>
           <canvas data-chart width="1200" height="460" role="img"
                   aria-label="Candlestick chart for ${esc(symbol)}"></canvas>
           <div class="chart-empty small muted" data-chart-empty>Loading price history…</div>

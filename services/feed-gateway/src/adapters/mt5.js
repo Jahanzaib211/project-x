@@ -5,6 +5,11 @@
  * terminal under Wine or the simulator: `GET /v1/ticks?symbols=…` streams
  * `data: {"symbol":"EURUSD","bid":"1.08500","ask":"1.08520","ms":…}` lines.
  * Needs `MT5_BRIDGE_URL`; unconfigured without it.
+ *
+ * A bridge that reports itself *simulated* is not a price source: its walk
+ * is a test fixture, and pricing clients on it would be pricing them on
+ * nothing. It is refused unless `MT5_ALLOW_SIMULATED=1` says otherwise —
+ * which the end-to-end suite does, and a deployment never should.
  */
 
 import { Adapter, decimal } from "./base.js";
@@ -43,6 +48,7 @@ export class Mt5Adapter extends Adapter {
   constructor() {
     super("mt5");
     this.url = process.env.MT5_BRIDGE_URL ?? "";
+    this.allowSimulated = process.env.MT5_ALLOW_SIMULATED === "1";
     /** @type {AbortController|null} */
     this.controller = null;
   }
@@ -59,6 +65,31 @@ export class Mt5Adapter extends Adapter {
     }
     const controller = new AbortController();
     this.controller = controller;
+    void this.check(symbols, controller);
+  }
+
+  /**
+   * Ask the bridge what it is before pricing anything on it.
+   * @param {string[]} symbols
+   * @param {AbortController} controller
+   */
+  async check(symbols, controller) {
+    try {
+      const response = await fetch(`${this.url}/v1/state`, { signal: controller.signal });
+      const state = /** @type {{state?: string, simulated?: boolean, detail?: string}} */ (await response.json());
+      if (state.simulated && !this.allowSimulated) {
+        this.state = "unconfigured";
+        this.detail = "the bridge is simulated; set MT5_ALLOW_SIMULATED=1 to price on it";
+        return;
+      }
+      if (state.state !== "connected") {
+        this.fail(`bridge is ${state.state ?? "unknown"}: ${state.detail ?? ""}`);
+        return;
+      }
+    } catch (error) {
+      if (this.controller === controller) this.fail(`bridge state unavailable: ${String(error)}`);
+      return;
+    }
     const url = `${this.url}/v1/ticks?symbols=${encodeURIComponent(symbols.join(","))}`;
     void this.consume(url, controller);
   }

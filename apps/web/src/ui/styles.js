@@ -506,6 +506,16 @@ table { border-collapse: collapse; width: 100%; }
 .account-figure { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-3); }
 .account-balance { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .account-balance.unavailable { font-size: 15px; font-weight: 500; color: var(--text-muted); }
+.chart-tools { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) var(--s-4); border-top: 1px solid var(--border); flex-wrap: wrap; }
+.chart-tools .select-sm { padding: 4px 28px 4px 8px; font-size: 12.5px; height: 30px; }
+.chart-tools .menu-heading { padding: var(--s-1) var(--s-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.chart-tools .menu-item input { margin-right: var(--s-2); }
+.chart-toggle { display: inline-flex; align-items: center; gap: var(--s-1); }
+.chart-suite { position: absolute; inset: 0; }
+.chart-suite[hidden] { display: none !important; }
+.chart-host.suite-active { aspect-ratio: auto; height: 560px; }
+.chart-host.suite-active > canvas { visibility: hidden; }
+.chart-host.suite-active [data-chart-empty] { display: none; }
 .session-banner { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-2) var(--s-4); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--warning-soft); font-size: 13px; }
 .account.account-new { outline: 2px solid var(--accent); outline-offset: 2px; transition: outline-color 1.2s ease; }
 [data-funding-result][data-tone="ok"] { color: var(--positive); }

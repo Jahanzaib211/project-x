@@ -31,6 +31,7 @@ import * as admin from "./admin.js";
 import * as external from "./external.js";
 import { HttpError, requireAmount } from "./money.js";
 import { forward, upstream, UPSTREAM } from "./core.js";
+import { serveStream } from "./stream.js";
 
 const PORT = Number(process.env.PORT ?? 8000);
 const SERVICE = "client-api";
@@ -409,6 +410,14 @@ function marketDataQuery(url) {
       throw new HttpError(400, "interval must look like 1m, 15m, 1h or 1d");
     }
     query.set("interval", interval);
+  }
+
+  const tick = url.searchParams.get("tick");
+  if (tick !== null) {
+    // A pinned tick: the window *ending* there, for paging back through
+    // history (INV-052 — any past window is the same answer every time).
+    if (!/^[0-9]{1,12}$/.test(tick)) throw new HttpError(400, "tick must be a whole number");
+    query.set("tick", tick);
   }
 
   const limit = url.searchParams.get("limit");
@@ -963,6 +972,30 @@ async function route(req, res) {
 
   if (path === "/v1/quotes") {
     return send(res, 200, await upstream(UPSTREAM.marketData, "/v1/quotes"));
+  }
+
+  if (path === "/v1/stream" && method === "GET") {
+    // One connection per tab, every live figure pushed as it changes. The
+    // parameters are validated the same way the polled endpoints validate
+    // theirs; an account is streamed only if it is the caller's.
+    const query = marketDataQuery(url);
+    const symbol = query.get("symbol");
+    const interval = query.get("interval") ?? "1m";
+    const wanted = url.searchParams.get("account");
+    let account = null;
+    if (wanted !== null) {
+      if (!/^\d{6,12}$/.test(wanted)) throw new HttpError(400, "account must be a trading account number");
+      const mine = await forward(UPSTREAM.ledger, `/v1/accounts?owner=${encodeURIComponent(owner)}`);
+      const held = (mine.ok ? mine.body.accounts ?? [] : []).some(
+        (/** @type {{accountNumber: string}} */ a) => String(a.accountNumber) === wanted,
+      );
+      if (!held) throw new HttpError(404, "account not found");
+      account = wanted;
+    }
+    if (!symbol && !account) throw new HttpError(400, "symbol or account is required");
+    incr("projectx_streams_opened_total");
+    serveStream(req, res, { symbol, interval, account });
+    return undefined;
   }
 
   if (path === "/v1/sessions") {

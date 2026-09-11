@@ -66,7 +66,22 @@ pub static INTERVALS: &[Interval] = &[
         label: "1h",
         ticks: 14_400,
     },
+    Interval {
+        label: "4h",
+        ticks: 57_600,
+    },
+    Interval {
+        label: "1d",
+        ticks: 345_600,
+    },
 ];
+
+/// Intervals longer than this are sampled rather than walked tick by tick
+/// when built from the synthetic series (see [`candle_over`]).
+const EXACT_UP_TO_TICKS: u64 = 14_400;
+
+/// How many samples a long synthetic candle takes across its window.
+const SAMPLES_PER_LONG_CANDLE: u64 = 240;
 
 /// The interval with this label, if the feed publishes it.
 #[must_use]
@@ -158,6 +173,10 @@ pub fn candles(
     Ok(out)
 }
 
+const fn span_of(open_tick: u64, last_tick: u64) -> u64 {
+    last_tick.saturating_sub(open_tick).saturating_add(1)
+}
+
 /// The single candle covering the open ticks in `[open_tick, last_tick]`, or
 /// `None` if the market was closed throughout.
 fn candle_over(instrument: &Instrument, open_tick: u64, last_tick: u64) -> Option<Candle> {
@@ -167,9 +186,12 @@ fn candle_over(instrument: &Instrument, open_tick: u64, last_tick: u64) -> Optio
     let kind = instrument.session;
     if !is_open(kind, open_tick) && !is_open(kind, last_tick) {
         // Both ends closed. Only a window longer than a closure could still
-        // contain open ticks, and none here is: the shortest closure is an
-        // hour and the longest interval is an hour, aligned to the hour.
-        return None;
+        // contain open ticks: for an interval up to an hour, aligned to the
+        // hour, that never happens (the shortest closure is an hour). A daily
+        // or four-hour window can straddle a closure, so those are walked.
+        if span_of(open_tick, last_tick) <= EXACT_UP_TO_TICKS {
+            return None;
+        }
     }
 
     let mut first: Option<i128> = None;
@@ -177,8 +199,22 @@ fn candle_over(instrument: &Instrument, open_tick: u64, last_tick: u64) -> Optio
     let mut low = 0i128;
     let mut close = 0i128;
 
+    // Up to an hour every tick is visited, so the candle is exact. A four-hour
+    // or daily candle over the synthetic series is *sampled* on a fixed stride
+    // — still a pure function of the tick, still identical everywhere, but a
+    // chart of a year does not walk a hundred million ticks. The first and
+    // last ticks are always visited, so consecutive candles still join.
+    let span = last_tick.saturating_sub(open_tick).saturating_add(1);
+    let stride = if span > EXACT_UP_TO_TICKS {
+        span.checked_div(SAMPLES_PER_LONG_CANDLE)
+            .unwrap_or(1)
+            .max(1)
+    } else {
+        1
+    };
+
     let mut tick = open_tick;
-    while tick <= last_tick {
+    loop {
         if is_open(kind, tick) {
             let mid = mid_raw(instrument, tick);
             match first {
@@ -194,12 +230,15 @@ fn candle_over(instrument: &Instrument, open_tick: u64, last_tick: u64) -> Optio
             }
             close = mid;
         }
+        if tick >= last_tick {
+            break;
+        }
         // The candle is a closed range, so the loop must stop on overflow
         // rather than wrap back to zero and run forever.
-        match tick.checked_add(1) {
-            Some(next) => tick = next,
+        tick = match tick.checked_add(stride) {
+            Some(next) => next.min(last_tick),
             None => break,
-        }
+        };
     }
 
     first.map(|open| Candle {
@@ -357,6 +396,16 @@ mod tests {
         // The newest candle is the last minute before Friday 22:00 UTC.
         let friday_close_ms = 1_789_164_000_000u64;
         assert_eq!(built[29].open_ms, friday_close_ms - 60_000);
+
+        // A daily candle straddles the Friday close: it exists, and covers
+        // only the open part of the day. Saturday itself has no candle.
+        let daily = interval("1d").unwrap();
+        let days = candles(gold, daily, saturday_noon, 3).unwrap();
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[2].open_ms, friday_close_ms - 22 * 3_600_000);
+        for pair in days.windows(2) {
+            assert!(pair[1].open_ms > pair[0].open_ms);
+        }
 
         // Crypto has no closed windows at all.
         let btc = find("BTCUSD").unwrap();

@@ -1,0 +1,5 @@
+klinecharts 10.0.3 — https://github.com/klinecharts/KLineChart — Apache-2.0
+Vendored verbatim from the npm package's dist/umd/klinecharts.min.js so the
+page can load it from this origin (the CSP is script-src 'self'); pinned by
+this file. Update: npm pack klinecharts@<version>, copy dist/umd/klinecharts.min.js,
+LICENSE and NOTICE here, and change the version above.

@@ -420,6 +420,12 @@ export function page({
   wallet = { balance: null, unavailableReason: null },
   user = null, rail = false, modal = "",
 }) {
+  // The chart suite is loaded on the terminal alone. It is a quarter of a
+  // megabyte the accounts page has no use for.
+  const chartScripts = path === "/terminal"
+    ? `<script src="/vendor/klinecharts.min.js"></script>
+<script type="module" src="/chart.js"></script>`
+    : "";
   return `<!doctype html>
 <html lang="en" data-theme="light">
 ${head(title)}
@@ -437,6 +443,7 @@ ${head(title)}
 </div>
 ${modal}
 <div class="toasts" data-toasts aria-live="polite"></div>
+${chartScripts}
 <script type="module" src="/client.js"></script>
 </body>
 </html>`;

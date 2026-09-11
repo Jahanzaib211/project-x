@@ -70,6 +70,19 @@ pub enum Recorded {
 /// under one symbol. Refused rather than recorded (INV-050).
 pub const MAX_SPREAD_BPS: i128 = 500;
 
+/// The largest move accepted between one recorded mid and the next, in basis
+/// points, while the previous quote is recent.
+///
+/// A quote fifteen percent away from one recorded moments ago is not a
+/// market move; it is a fat finger, a mis-mapped symbol or a provider
+/// replaying the wrong day. Refused (INV-050). A gap after a long silence —
+/// a weekend, an outage — is allowed through, because there the old quote is
+/// the one that is wrong.
+pub const MAX_JUMP_BPS: i128 = 1_500;
+
+/// How recent the previous quote must be for [`MAX_JUMP_BPS`] to apply.
+pub const JUMP_WINDOW_TICKS: u64 = 10 * 60 * 1_000 / crate::TICK_MS;
+
 /// The recorded feed for every instrument.
 #[derive(Clone, Debug, Default)]
 pub struct FeedStore {
@@ -132,6 +145,24 @@ impl FeedStore {
             .unwrap_or(0);
         if spread > widest {
             return Err(MarketError::InvalidQuote("spread is absurd for the mid"));
+        }
+        // The spike filter: measured against the latest quote at or before
+        // this tick, so a backfill of history is judged against its own
+        // neighbours rather than against today.
+        if let Some(previous) = self.latest_at(instrument.symbol, tick) {
+            if tick.saturating_sub(previous.tick) <= JUMP_WINDOW_TICKS {
+                let reference = previous.mid_raw();
+                let jump = mid.saturating_sub(reference).abs();
+                let widest_jump = reference
+                    .saturating_mul(MAX_JUMP_BPS)
+                    .checked_div(10_000)
+                    .unwrap_or(0);
+                if jump > widest_jump {
+                    return Err(MarketError::InvalidQuote(
+                        "price is too far from the last recorded quote",
+                    ));
+                }
+            }
         }
 
         let series = self.quotes.entry(instrument.symbol).or_default();
@@ -445,6 +476,32 @@ mod tests {
             Ok(Recorded::Accepted)
         );
         assert_eq!(store.len(), 1);
+    }
+
+    /// INV-050 — a quote far from the one just recorded is a broken feed,
+    /// not a market; after a long silence the same move is a gap and allowed.
+    #[test]
+    fn inv_050_a_spike_is_refused_while_a_gap_after_silence_is_not() {
+        let mut store = FeedStore::new();
+        store
+            .record("BTCUSD", OPEN, 1, 6_820_000_000_000, 6_820_100_000_000)
+            .unwrap();
+        // +2% a second later: fine. +20%: refused.
+        assert!(store
+            .record("BTCUSD", OPEN + 4, 1, 6_956_000_000_000, 6_956_100_000_000)
+            .is_ok());
+        assert_eq!(
+            store.record("BTCUSD", OPEN + 8, 1, 8_200_000_000_000, 8_200_100_000_000),
+            Err(MarketError::InvalidQuote(
+                "price is too far from the last recorded quote"
+            ))
+        );
+        assert_eq!(store.len(), 2);
+        // The same move after eleven minutes of silence is a gap, and kept.
+        let later = OPEN + 4 + JUMP_WINDOW_TICKS + 1;
+        assert!(store
+            .record("BTCUSD", later, 1, 8_200_000_000_000, 8_200_100_000_000)
+            .is_ok());
     }
 
     /// INV-122 — the same quote applied twice is applied once.

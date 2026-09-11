@@ -84,6 +84,19 @@ const isPublicPath = (path) => PUBLIC_PATHS.has(path) || path.startsWith("/docs/
 const API_INTERNAL_URL = process.env.API_INTERNAL_URL ?? "http://client-api:8000";
 
 const CLIENT_JS_PATH = new URL("./client.js", import.meta.url);
+const CHART_JS_PATH = new URL("./chart.js", import.meta.url);
+const VENDOR_DIR = new URL("../vendor/", import.meta.url);
+
+/**
+ * The vendored chart library, served from this origin.
+ *
+ * The CSP is `script-src 'self'`, deliberately: no CDN, no third-party host
+ * that can change what the page runs. So the library is a file in this
+ * repository, pinned by `vendor/klinecharts/VERSION`, and served here.
+ */
+const VENDORED = new Map([
+  ["/vendor/klinecharts.min.js", "klinecharts/klinecharts.min.js"],
+]);
 
 /**
  * Read one cookie.
@@ -337,6 +350,54 @@ async function proxy(req, res, path) {
 }
 
 /**
+ * Pipe a server-sent event stream from the API to the browser.
+ * @param {http.IncomingMessage} req
+ * @param {http.ServerResponse} res
+ * @param {string} path Path including the query string.
+ */
+async function proxyStream(req, res, path) {
+  const controller = new AbortController();
+  req.on("close", () => controller.abort());
+  /** @type {Record<string, string>} */
+  const headers = { accept: "text/event-stream" };
+  const token = cookie(req, SESSION_COOKIE);
+  if (token) headers.authorization = `Bearer ${token}`;
+  const remote = req.socket.remoteAddress;
+  if (remote) headers["x-forwarded-for"] = remote;
+  let upstream;
+  try {
+    upstream = await fetch(`${API_INTERNAL_URL}${path}`, { headers, signal: controller.signal });
+  } catch {
+    res.writeHead(503, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: "core_unavailable" }));
+  }
+  if (!upstream.ok || !upstream.body) {
+    const body = await upstream.text().catch(() => "");
+    res.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(body || JSON.stringify({ error: "stream_unavailable" }));
+  }
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+  const reader = upstream.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!res.write(value)) await new Promise((resolve) => res.once("drain", resolve));
+    }
+  } catch {
+    /* the browser or the API went away; either way the stream is over */
+  } finally {
+    if (!res.writableEnded) res.end();
+  }
+  return undefined;
+}
+
+/**
  * Read an `application/x-www-form-urlencoded` body.
  *
  * This exists for the no-JavaScript path. The auth forms are real forms with a
@@ -368,11 +429,28 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" });
       return res.end(stylesheet);
     }
-    if (path === "/client.js") {
+    if (path === "/client.js" || path === "/chart.js") {
       const { readFile } = await import("node:fs/promises");
-      const source = await readFile(CLIENT_JS_PATH, "utf8");
+      const source = await readFile(path === "/chart.js" ? CHART_JS_PATH : CLIENT_JS_PATH, "utf8");
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
       return res.end(source);
+    }
+    const vendored = VENDORED.get(path);
+    if (vendored) {
+      const { readFile } = await import("node:fs/promises");
+      const source = await readFile(new URL(vendored, VENDOR_DIR));
+      res.writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        // Pinned by file content, so it may be cached hard.
+        "cache-control": "public, max-age=86400, immutable",
+      });
+      return res.end(source);
+    }
+    if (path === "/api/v1/stream") {
+      // Streamed, not proxied through callApi: an event stream never ends,
+      // so it cannot be read into a body. Piped byte for byte, and torn down
+      // upstream when the browser goes away.
+      return await proxyStream(req, res, `${path.slice(4)}${url.search}`);
     }
     if (path === "/api/health") {
       res.writeHead(200, { "content-type": "application/json" });
