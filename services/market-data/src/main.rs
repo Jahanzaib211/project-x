@@ -44,7 +44,7 @@ fn now_tick() -> u64 {
 /// exactness would be gone before it reached anything that cared (P1).
 fn quote_json(instrument: &Instrument, quote: &Quote, now: u64) -> String {
     format!(
-        r#"{{"symbol":"{}","name":"{}","class":"{}","digits":{},"bid":"{}","ask":"{}","mid":"{}","spreadPoints":{},"tick":{},"timestampMs":{},"ageMs":{}}}"#,
+        r#"{{"symbol":"{}","name":"{}","class":"{}","digits":{},"bid":"{}","ask":"{}","mid":"{}","spreadPoints":{},"tick":{},"timestampMs":{},"ageMs":{},"session":{}}}"#,
         escape(instrument.symbol),
         escape(instrument.name),
         escape(instrument.class),
@@ -56,12 +56,14 @@ fn quote_json(instrument: &Instrument, quote: &Quote, now: u64) -> String {
         quote.tick(),
         market_core::epoch_ms_of(quote.tick()),
         quote.age_ms(now),
+        // INV-053 — a frozen quote says so, and says when it was priced.
+        market_core::session::state_json(instrument.session, quote.tick()),
     )
 }
 
 fn instrument_json(instrument: &Instrument) -> String {
     format!(
-        r#"{{"symbol":"{}","name":"{}","class":"{}","digits":{},"contractSize":{},"maxLeverage":{},"minVolumeMilliLots":{},"maxVolumeMilliLots":{},"commissionPerLotMinor":{}}}"#,
+        r#"{{"symbol":"{}","name":"{}","class":"{}","digits":{},"contractSize":{},"maxLeverage":{},"minVolumeMilliLots":{},"maxVolumeMilliLots":{},"commissionPerLotMinor":{},"sessionKind":"{}","sessionHours":"{}"}}"#,
         escape(instrument.symbol),
         escape(instrument.name),
         escape(instrument.class),
@@ -71,6 +73,8 @@ fn instrument_json(instrument: &Instrument) -> String {
         instrument.min_volume_milli_lots,
         instrument.max_volume_milli_lots,
         instrument.commission_per_lot_minor,
+        escape(instrument.session.name()),
+        escape(instrument.session.hours()),
     )
 }
 
@@ -95,9 +99,18 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
         )),
 
         "/v1/instruments" => {
+            let now = now_tick();
             let body = INSTRUMENTS
                 .iter()
-                .map(instrument_json)
+                .map(|instrument| {
+                    // The static description plus where its session stands now.
+                    let base = instrument_json(instrument);
+                    format!(
+                        r#"{},"session":{}}}"#,
+                        base.trim_end_matches('}'),
+                        market_core::session::state_json(instrument.session, now)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             let intervals = INTERVALS
@@ -108,6 +121,32 @@ fn handle(request: &Request, max_staleness_ms: u64) -> Option<Response> {
             Some(Response::json(
                 200,
                 format!(r#"{{"instruments":[{body}],"intervals":[{intervals}]}}"#),
+            ))
+        }
+
+        "/v1/sessions" => {
+            // Every instrument's session at `tick` (default now), for an
+            // interface that wants to say "gold opens in 31 hours" without
+            // asking for a quote.
+            let now = now_tick();
+            let tick = request
+                .param("tick")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(now);
+            let rows = INSTRUMENTS
+                .iter()
+                .map(|instrument| {
+                    format!(
+                        r#"{{"symbol":"{}","session":{}}}"#,
+                        escape(instrument.symbol),
+                        market_core::session::state_json(instrument.session, tick)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(Response::json(
+                200,
+                format!(r#"{{"tick":{tick},"sessions":[{rows}]}}"#),
             ))
         }
 
@@ -313,6 +352,53 @@ mod tests {
         assert!(json.contains(r#""max_staleness_ms":500"#));
         assert!(json.contains(r#""tick_ms":250"#));
         assert!(json.contains("INV-051"));
+    }
+
+    /// INV-053 — on a Saturday gold's quote is frozen at Friday's close and
+    /// says so; bitcoin's is live.
+    #[test]
+    fn inv_053_a_closed_market_serves_a_frozen_quote_that_says_it_is_frozen() {
+        // 2026-09-12 12:00 UTC, a Saturday.
+        let saturday_noon = 1_789_214_400_000u64 / TICK_MS;
+        let gold = body(&format!("/v1/quote?symbol=XAUUSD&tick={saturday_noon}"));
+        assert!(gold.contains(r#""open":false"#), "{gold}");
+        // Priced at the last tick before Friday 22:00 UTC.
+        let friday_close_tick = 1_789_164_000_000u64 / TICK_MS - 1;
+        assert!(
+            gold.contains(&format!(r#""pricedTick":{friday_close_tick}"#)),
+            "{gold}"
+        );
+        assert!(
+            gold.contains(r#""nextTransitionMs":1789340400000"#),
+            "{gold}"
+        );
+        // The price is the same one an hour later: nothing new was produced.
+        let later = body(&format!(
+            "/v1/quote?symbol=XAUUSD&tick={}",
+            saturday_noon + 14_400
+        ));
+        let price = |json: &str| {
+            json.split(r#""bid":""#)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(price(&gold), price(&later));
+
+        let btc = body(&format!("/v1/quote?symbol=BTCUSD&tick={saturday_noon}"));
+        assert!(btc.contains(r#""open":true"#));
+        assert!(btc.contains(r#""nextTransitionMs":null"#));
+
+        let sessions = body(&format!("/v1/sessions?tick={saturday_noon}"));
+        assert_eq!(
+            sessions.matches(r#""open":false"#).count(),
+            INSTRUMENTS.len() - 1
+        );
+        let instruments = body("/v1/instruments");
+        assert!(instruments.contains(r#""sessionKind":"metals""#));
     }
 
     #[test]

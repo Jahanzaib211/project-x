@@ -76,6 +76,9 @@ pub enum Rejection {
         /// How old it was.
         age_ms: u64,
     },
+    /// The instrument's market is closed (INV-084). The price on offer is a
+    /// frozen one, and nothing fills at a frozen price.
+    MarketClosed,
     /// The engine could not evaluate. Fails closed (INV-083).
     EngineUnavailable,
 }
@@ -93,6 +96,7 @@ impl Rejection {
             Self::InsufficientFreeMargin { .. } => "INSUFFICIENT_FREE_MARGIN",
             Self::MarginLevelTooLow { .. } => "MARGIN_LEVEL_TOO_LOW",
             Self::StaleMarket { .. } => "STALE_MARKET",
+            Self::MarketClosed => "MARKET_CLOSED",
             Self::EngineUnavailable => "RISK_ENGINE_UNAVAILABLE",
         }
     }
@@ -120,6 +124,7 @@ impl core::fmt::Display for Rejection {
             Self::StaleMarket { age_ms } => {
                 write!(f, "the price is {age_ms}ms old and cannot be traded on")
             }
+            Self::MarketClosed => f.write_str("the market for this instrument is closed"),
             Self::EngineUnavailable => {
                 f.write_str("risk checks are unavailable, so the order was refused")
             }
@@ -265,6 +270,8 @@ pub struct OrderIntent<'a> {
     pub market_age_ms: u64,
     /// Whether the account is in a state that may trade (INV-032).
     pub account_tradable: bool,
+    /// Whether the instrument's market is open at `tick` (INV-084).
+    pub session_open: bool,
 }
 
 /// The oldest market state an order may be assessed against (INV-062).
@@ -280,6 +287,11 @@ pub fn assess(intent: &OrderIntent<'_>, valuation: &Valuation, policy: &MarginPo
     // list rather than a different one on each attempt.
     if !intent.account_tradable {
         return reject(Rejection::AccountNotTradable, None);
+    }
+    // INV-084 — before anything about price or margin. A closed market has no
+    // price to reason about; the one on offer is frozen and would fill nobody.
+    if !intent.session_open {
+        return reject(Rejection::MarketClosed, None);
     }
 
     let milli_lots = milli_lots_of(intent.quantity, intent.instrument);
@@ -436,6 +448,7 @@ mod tests {
             tick: 1_000,
             market_age_ms: 0,
             account_tradable: true,
+            session_open: true,
         }
     }
 
@@ -588,6 +601,26 @@ mod tests {
         assert!(assess(&order, &flat("10000.00"), &POLICY).is_approved());
     }
 
+    /// INV-084 — a closed market is refused before price or margin is
+    /// considered, however well funded the account is.
+    #[test]
+    fn inv_084_a_closed_market_is_refused_regardless_of_margin() {
+        let eurusd = find("EURUSD").unwrap();
+        let mut order = intent(eurusd, 100);
+        order.session_open = false;
+        match assess(&order, &flat("1000000.00"), &POLICY) {
+            Decision::Rejected {
+                reason, snapshot, ..
+            } => {
+                assert_eq!(reason, Rejection::MarketClosed);
+                assert!(snapshot.is_none(), "no price was reasoned about");
+            }
+            Decision::Approved(_) => panic!("a closed market must not fill"),
+        }
+        order.session_open = true;
+        assert!(assess(&order, &flat("10000.00"), &POLICY).is_approved());
+    }
+
     #[test]
     fn a_non_tradable_account_is_refused_before_anything_else_is_considered() {
         let eurusd = find("EURUSD").unwrap();
@@ -665,6 +698,7 @@ mod tests {
                 threshold_bp: 2,
             },
             Rejection::StaleMarket { age_ms: 1 },
+            Rejection::MarketClosed,
             Rejection::EngineUnavailable,
         ] {
             assert!(!reason.code().is_empty());

@@ -29,6 +29,8 @@
 //! - **INV-051** — a consumer can always tell how stale a state is, so it can
 //!   refuse to act on it.
 //! - **INV-052** — the canonical state for a tick is identical everywhere.
+//! - **INV-053** — outside its session an instrument's quote is frozen at the
+//!   last open tick; no new price is produced while the market is closed.
 //! - **INV-061** — bid <= ask on every quote (enforced at construction).
 
 #![forbid(unsafe_code)]
@@ -37,10 +39,12 @@
 pub mod candle;
 pub mod instrument;
 pub mod series;
+pub mod session;
 
 pub use candle::{Candle, Interval};
 pub use instrument::{Instrument, INSTRUMENTS};
 pub use series::mid_raw;
+pub use session::{SessionKind, SessionState};
 
 use domain_kernel::{MoneyError, Price, Usd};
 
@@ -101,6 +105,10 @@ pub struct Quote {
     tick: u64,
     bid: Price<Usd>,
     ask: Price<Usd>,
+    /// The tick the prices were actually produced at. Equal to `tick` while
+    /// the market is open; the last open tick while it is closed (INV-053).
+    priced_tick: u64,
+    session_open: bool,
 }
 
 impl Quote {
@@ -127,7 +135,30 @@ impl Quote {
             tick,
             bid,
             ask,
+            priced_tick: tick,
+            session_open: true,
         })
+    }
+
+    /// Mark this quote as frozen: produced at `priced_tick`, carried forward
+    /// unchanged to `tick` because the market has been closed since.
+    #[must_use]
+    pub const fn frozen_since(mut self, priced_tick: u64) -> Self {
+        self.priced_tick = priced_tick;
+        self.session_open = false;
+        self
+    }
+
+    /// Whether the market was open at this quote's tick.
+    #[must_use]
+    pub const fn session_open(&self) -> bool {
+        self.session_open
+    }
+
+    /// The tick the prices were produced at (INV-053).
+    #[must_use]
+    pub const fn priced_tick(&self) -> u64 {
+        self.priced_tick
     }
 
     /// The instrument symbol.
@@ -207,7 +238,10 @@ impl Quote {
 /// [`MarketError::InvalidQuote`] if the synthesised state fails validation,
 /// which would be a bug in the spread model rather than a market condition.
 pub fn quote_at(instrument: &Instrument, tick: u64) -> Result<Quote, MarketError> {
-    let mid = mid_raw(instrument, tick);
+    // INV-053 — a closed market produces no new price. The quote is the one
+    // from the last open tick, and it says so.
+    let priced_tick = session::last_open_tick(instrument.session, tick);
+    let mid = mid_raw(instrument, priced_tick);
     // The spread is a whole number of the instrument's own price increments, so
     // it lands exactly on the quoted grid rather than a fraction below it.
     let half = instrument
@@ -221,12 +255,17 @@ pub fn quote_at(instrument: &Instrument, tick: u64) -> Result<Quote, MarketError
     let ask = mid
         .checked_add(half)
         .ok_or(MarketError::InvalidQuote("ask is not representable"))?;
-    Quote::validated(
+    let quote = Quote::validated(
         instrument.symbol,
         tick,
         Price::from_raw(bid),
         Price::from_raw(ask),
-    )
+    )?;
+    Ok(if priced_tick == tick {
+        quote
+    } else {
+        quote.frozen_since(priced_tick)
+    })
 }
 
 /// The tick index containing `epoch_ms`.

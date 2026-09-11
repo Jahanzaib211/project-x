@@ -437,15 +437,15 @@ impl Core {
         number: &str,
         status: Status,
     ) -> Result<TradingAccount, CoreError> {
-        let index = self
-            .accounts
-            .iter()
-            .position(|a| a.number == number)
-            .ok_or_else(|| CoreError::UnknownAccount(number.to_owned()))?;
-        let mut updated = self.accounts[index].clone();
+        let mut updated = self
+            .account(number)
+            .ok_or_else(|| CoreError::UnknownAccount(number.to_owned()))?
+            .clone();
         updated.set_status(status).map_err(CoreError::Account)?;
         self.append_log(&status_record(number, status))?;
-        self.accounts[index] = updated.clone();
+        if let Some(stored) = self.accounts.iter_mut().find(|a| a.number == number) {
+            *stored = updated.clone();
+        }
         Ok(updated)
     }
 
@@ -569,6 +569,8 @@ impl Core {
             market_age_ms: 0,
             // INV-032, asked once, here, rather than re-tested in three places.
             account_tradable: account.may_originate(),
+            // INV-084 — the quote knows whether it is live or frozen.
+            session_open: quote.session_open(),
         };
 
         let order_id = self.take_id();
@@ -1023,7 +1025,7 @@ mod tests {
     /// Open an account and trade it, so there is real history to recover.
     fn trade(core: &mut Core) -> String {
         let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_000_000)
+            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
             .unwrap();
         let number = account.number.clone();
         core.place_order(
@@ -1031,7 +1033,7 @@ mod tests {
             "EURUSD",
             Side::Buy,
             1_000,
-            1_000_000,
+            1_526_000,
             "key-open-0001",
         )
         .unwrap();
@@ -1040,7 +1042,7 @@ mod tests {
             "XAUUSD",
             Side::Sell,
             100,
-            1_000_100,
+            1_526_100,
             "key-open-0002",
         )
         .unwrap();
@@ -1051,7 +1053,7 @@ mod tests {
             "EURUSD",
             Side::Sell,
             500,
-            1_000_200,
+            1_526_200,
             "key-part-0003",
         )
         .unwrap();
@@ -1068,12 +1070,12 @@ mod tests {
         let (before, account) = {
             let mut core = Core::open(scratch.path()).unwrap();
             let account = trade(&mut core);
-            (fingerprint(&core, &account, 1_000_300), account)
+            (fingerprint(&core, &account, 1_526_300), account)
         };
         // The process is gone; nothing was written on the way out.
 
         let recovered = Core::open(scratch.path()).unwrap();
-        let after = fingerprint(&recovered, &account, 1_000_300);
+        let after = fingerprint(&recovered, &account, 1_526_300);
 
         assert_eq!(before, after);
         assert_eq!(recovered.projection_drift(), 0, "INV-023 after replay");
@@ -1093,7 +1095,7 @@ mod tests {
         let (complete, account) = {
             let mut core = Core::open(scratch.path()).unwrap();
             let account = trade(&mut core);
-            (fingerprint(&core, &account, 1_000_300), account)
+            (fingerprint(&core, &account, 1_526_300), account)
         };
 
         // Simulate a power cut part-way through appending the next deal.
@@ -1107,7 +1109,7 @@ mod tests {
 
         let recovered = Core::open(scratch.path()).unwrap();
         assert_eq!(
-            fingerprint(&recovered, &account, 1_000_300),
+            fingerprint(&recovered, &account, 1_526_300),
             complete,
             "a torn line must change nothing"
         );
@@ -1139,7 +1141,7 @@ mod tests {
                 "EURUSD",
                 Side::Buy,
                 100,
-                1_000_400,
+                1_526_400,
                 "key-after-0001",
             )
             .unwrap();
@@ -1157,7 +1159,7 @@ mod tests {
         let scratch = Scratch::new("durable");
         let mut core = Core::open(scratch.path()).unwrap();
         let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_000_000)
+            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
             .unwrap();
 
         // The account's funding is already in the file, before this line runs.
@@ -1169,7 +1171,7 @@ mod tests {
             "EURUSD",
             Side::Buy,
             100,
-            1_000_000,
+            1_526_000,
             "key-x-0001",
         )
         .unwrap();
@@ -1186,7 +1188,7 @@ mod tests {
         let scratch = Scratch::new("rejected");
         let mut core = Core::open(scratch.path()).unwrap();
         let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_000_000)
+            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
             .unwrap();
         let before = scratch.text();
 
@@ -1195,7 +1197,7 @@ mod tests {
             "EURUSD",
             Side::Buy,
             49_000,
-            1_000_000,
+            1_526_000,
             "key-refused-01",
         );
         assert!(matches!(refused, Err(CoreError::Refused(_))));
@@ -1216,7 +1218,7 @@ mod tests {
     fn the_round_trip_moves_the_balance_by_exactly_the_result_less_commission() {
         let mut core = Core::in_memory();
         let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 2_000_000)
+            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 2_476_800)
             .unwrap()
             .number;
         assert_eq!(
@@ -1230,14 +1232,14 @@ mod tests {
                 "EURUSD",
                 Side::Buy,
                 1_000,
-                2_000_000,
+                2_476_800,
                 "open-key-0001",
             )
             .unwrap();
         let open_deal = opened.deal.unwrap();
 
         let closed = core
-            .close_position(&account, "EURUSD", 2_000_400, "close-key-0001")
+            .close_position(&account, "EURUSD", 2_477_200, "close-key-0001")
             .unwrap();
         let close_deal = closed.deal.unwrap();
 

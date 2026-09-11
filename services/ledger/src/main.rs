@@ -706,7 +706,7 @@ mod tests {
     fn funded() -> (Mutex<Core>, String) {
         let mut core = Core::in_memory();
         let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_000_000)
+            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
             .unwrap();
         (Mutex::new(core), account.number)
     }
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn a_demo_account_opens_funded_and_flat() {
         let (core, number) = funded();
-        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_000_000);
+        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_526_000);
         assert_eq!(state.status, 200);
         assert!(state.body.contains(r#""balance":"10000.00""#));
         assert!(state.body.contains(r#""equity":"10000.00""#));
@@ -743,13 +743,13 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(response.status, 201);
         assert!(response.body.contains(r#""state":"FILLED""#));
         assert!(response.body.contains(r#""commission":"0.35""#));
 
-        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_000_000);
+        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_526_000);
         assert!(state.body.contains(r#""symbol":"EURUSD""#));
         assert!(state.body.contains(r#""side":"BUY""#));
         assert!(state.body.contains(r#""volume":"0.100""#));
@@ -763,11 +763,11 @@ mod tests {
         let (core, number) = funded();
         let body =
             format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#);
-        let first = post(&core, "/v1/orders", &body, 1_000_000);
-        let second = post(&core, "/v1/orders", &body, 1_000_050);
+        let first = post(&core, "/v1/orders", &body, 1_526_000);
+        let second = post(&core, "/v1/orders", &body, 1_526_050);
 
         assert_eq!(first.body, second.body, "a retry must replay, not re-place");
-        let orders = get(&core, &format!("/v1/accounts/{number}/orders"), 1_000_000);
+        let orders = get(&core, &format!("/v1/accounts/{number}/orders"), 1_526_000);
         assert_eq!(orders.body.matches(r#""orderId""#).count(), 1);
     }
 
@@ -782,7 +782,7 @@ mod tests {
                     r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#
                 ),
             ),
-            1_000_000,
+            1_526_000,
         )
         .unwrap();
         assert_eq!(response.status, 400);
@@ -798,7 +798,7 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"1.00"}}"#),
-            1_000_000,
+            1_526_000,
         );
 
         let mut close = Request::post(
@@ -808,17 +808,17 @@ mod tests {
         close
             .headers
             .push(("idempotency-key".to_owned(), "close-key-0001".to_owned()));
-        let closed = handle(&core, &close, 1_000_400).unwrap();
+        let closed = handle(&core, &close, 1_526_400).unwrap();
         assert_eq!(closed.status, 201);
         assert!(closed.body.contains(r#""side":"SELL""#));
         assert!(closed.body.contains(r#""closedVolume":"1.000""#));
 
-        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_000_400);
+        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_526_400);
         assert!(state.body.contains(r#""positions":[]"#), "INV-043");
         assert!(state.body.contains(r#""usedMargin":"0.00""#));
 
         // The book still balances after everything.
-        let invariants = get(&core, "/v1/invariants", 1_000_400);
+        let invariants = get(&core, "/v1/invariants", 1_526_400);
         assert_eq!(invariants.status, 200);
         assert!(invariants.body.contains(r#""healthy":true"#));
     }
@@ -833,7 +833,7 @@ mod tests {
         close
             .headers
             .push(("idempotency-key".to_owned(), "close-key-0001".to_owned()));
-        let response = handle(&core, &close, 1_000_000).unwrap();
+        let response = handle(&core, &close, 1_526_000).unwrap();
         assert_eq!(response.status, 422);
         assert!(response.body.contains("NOTHING_TO_CLOSE"));
     }
@@ -853,7 +853,7 @@ mod tests {
             &format!(
                 r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"500.00"}}"#
             ),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(oversized.status, 422);
         assert!(oversized.body.contains("VOLUME_ABOVE_MAXIMUM"));
@@ -867,7 +867,7 @@ mod tests {
         request
             .headers
             .push(("idempotency-key".to_owned(), "too-big-00000001".to_owned()));
-        let response = handle(&core, &request, 1_000_000).unwrap();
+        let response = handle(&core, &request, 1_526_000).unwrap();
         assert_eq!(response.status, 422);
         assert!(
             response.body.contains("INSUFFICIENT_FREE_MARGIN"),
@@ -877,7 +877,7 @@ mod tests {
         assert!(response.body.contains(r#""state":"REJECTED""#));
 
         // Nothing was booked by either attempt.
-        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_000_000);
+        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_526_000);
         assert!(state.body.contains(r#""positions":[]"#));
         assert!(state.body.contains(r#""balance":"10000.00""#));
     }
@@ -903,7 +903,7 @@ mod tests {
                 "decimal string",
             ),
         ] {
-            let response = post(&core, "/v1/orders", body, 1_000_000);
+            let response = post(&core, "/v1/orders", body, 1_526_000);
             assert_eq!(response.status, 400, "{body}");
             assert!(
                 response.body.contains(expected),
@@ -916,7 +916,7 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":0.10}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(numeric.status, 400);
     }
@@ -928,7 +928,7 @@ mod tests {
             &core,
             "/v1/orders",
             r#"{"account":"99999999","symbol":"EURUSD","side":"BUY","volume":"0.10"}"#,
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(unknown_account.status, 404);
 
@@ -936,7 +936,7 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"NOTREAL","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(unknown_symbol.status, 404);
     }
@@ -948,12 +948,12 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         let statement = get(
             &core,
             &format!("/v1/accounts/{number}/statement"),
-            1_000_000,
+            1_526_000,
         );
         assert!(statement.body.contains("DEMO_CREDIT"));
         assert!(statement.body.contains("REALISED_PNL"));
@@ -992,7 +992,7 @@ mod tests {
             &core,
             "/v1/accounts",
             r#"{"owner":"o1","nickname":"Real","leverage":100,"mode":"real"}"#,
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(opened.status, 201);
         assert!(opened.body.contains(r#""mode":"real""#));
@@ -1006,7 +1006,7 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_000_000);
+        let state = get(&core, &format!("/v1/accounts/{number}/state"), 1_526_000);
         assert!(state.body.contains(r#""balance":"0.00""#));
         assert_eq!(core.lock().unwrap().version(), 0, "nothing was posted");
 
@@ -1023,7 +1023,7 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(order.status, 422);
     }
@@ -1038,7 +1038,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-credit"),
             r#"{"amount":"2500.00"}"#,
             "credit-key-0001",
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(first.status, 201, "{}", first.body);
         assert!(first.body.contains(r#""balance":"12500.00""#));
@@ -1049,7 +1049,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-credit"),
             r#"{"amount":"2500.00"}"#,
             "credit-key-0001",
-            1_000_001,
+            1_526_001,
         );
         assert_eq!(again.status, 200);
         assert!(again.body.contains(r#""replayed":true"#));
@@ -1063,7 +1063,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-credit"),
             r#"{"amount":"999999.00"}"#,
             "credit-key-0002",
-            1_000_002,
+            1_526_002,
         );
         assert_eq!(too_much.status, 422);
         assert!(too_much.body.contains("DEMO_CAP_EXCEEDED"));
@@ -1123,13 +1123,13 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-credit"),
             r#"{"amount":"100.00"}"#,
             "credit-key-0010",
-            1_000_000,
+            1_526_000,
         );
         let order = post(
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(order.status, 201);
 
@@ -1138,7 +1138,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-reset"),
             "{}",
             "reset-key-0001",
-            1_000_001,
+            1_526_001,
         );
         assert_eq!(blocked.status, 422);
         assert!(blocked.body.contains("POSITIONS_OPEN"));
@@ -1148,7 +1148,7 @@ mod tests {
             "/v1/positions/close",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD"}}"#),
             "close-key-00001",
-            1_000_002,
+            1_526_002,
         );
         assert_eq!(closed.status, 201);
 
@@ -1157,7 +1157,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-reset"),
             "{}",
             "reset-key-0002",
-            1_000_003,
+            1_526_003,
         );
         assert_eq!(reset.status, 201, "{}", reset.body);
         assert!(reset.body.contains(r#""balance":"10000.00""#));
@@ -1168,7 +1168,7 @@ mod tests {
             &format!("/v1/accounts/{number}/demo-reset"),
             "{}",
             "reset-key-0003",
-            1_000_004,
+            1_526_004,
         );
         assert_eq!(nothing.status, 201);
         assert!(nothing.body.contains(r#""transaction":null"#));
@@ -1191,7 +1191,7 @@ mod tests {
             &core,
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(order.status, 422);
 
@@ -1219,7 +1219,7 @@ mod tests {
             "/v1/orders",
             &format!(r#"{{"account":"{number}","symbol":"EURUSD","side":"BUY","volume":"0.10"}}"#),
             "order-key-00002",
-            1_000_000,
+            1_526_000,
         );
         assert_eq!(order.status, 201);
 

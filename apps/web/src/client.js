@@ -787,12 +787,67 @@ function setPrice(el, next) {
 }
 
 /**
+ * A duration as people say it: "1d 3h", "42m", "under a minute".
+ * @param {number} ms
+ */
+function humanDuration(ms) {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "under a minute";
+  const days = Math.floor(minutes / 1_440);
+  const hours = Math.floor((minutes % 1_440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+/**
+ * Reflect the instrument's session on the terminal (INV-053, INV-084).
+ *
+ * A closed market shows a banner with when it reopens, freezes the quote
+ * strip's "age" and disables the ticket. The server rendered the same state
+ * for the first paint; this keeps it true as the clock moves.
+ *
+ * @param {HTMLElement} root
+ * @param {{open: boolean, nextTransitionMs: number|null, hours?: string}|undefined} session
+ */
+function applySession(root, session) {
+  if (!session) return;
+  const open = session.open !== false;
+  root.dataset.sessionOpen = open ? "true" : "false";
+  const banner = $("[data-session-banner]", root);
+  if (banner) {
+    banner.hidden = open;
+    banner.dataset.open = open ? "true" : "false";
+    const text = $("[data-session-text]", banner);
+    if (text && !open) {
+      text.textContent = `${chart.symbol} is closed. Prices are frozen at the last close; orders are refused until it reopens.`;
+    }
+    const countdown = $("[data-session-countdown]", banner);
+    if (countdown) {
+      countdown.textContent = !open && session.nextTransitionMs
+        ? `Opens in ${humanDuration(session.nextTransitionMs - Date.now())}`
+        : "";
+    }
+  }
+  $$("[data-buy], [data-sell]", root).forEach((button) => {
+    /** @type {HTMLButtonElement} */ (button).disabled = !open;
+  });
+  if (!open) note(root, "Market closed — orders are refused until it reopens.", "");
+  else {
+    const el = $("[data-ticket-note]", root);
+    if (el && el.textContent?.startsWith("Market closed")) note(root, "", "");
+  }
+}
+
+/**
  * Poll the live quote and refresh the growing candle.
  * @param {HTMLElement} root
  */
 async function refreshQuote(root) {
   try {
     const quote = await api(`/v1/quote?symbol=${encodeURIComponent(chart.symbol)}`);
+    applySession(root, quote.session);
     setPrice($("[data-bid]", root), quote.bid);
     setPrice($("[data-ask]", root), quote.ask);
     const buy = $("[data-buy-price]", root);
@@ -808,7 +863,11 @@ async function refreshQuote(root) {
       spread.textContent = `${quote.bid} / ${quote.ask}`;
     }
     const age = $("[data-quote-age]", root);
-    if (age) age.textContent = `${quote.ageMs ?? 0} ms`;
+    if (age) {
+      age.textContent = quote.session && quote.session.open === false
+        ? "frozen"
+        : `${quote.ageMs ?? 0} ms`;
+    }
   } catch {
     // A dropped poll is not worth a toast; the next one is 800ms away.
   }
@@ -1036,6 +1095,8 @@ function initTerminal() {
     root.dataset.symbol = select.value;
     const option = select.selectedOptions[0];
     if (option) canvas?.setAttribute("aria-label", `Candlestick chart for ${option.value}`);
+    const hours = $("[data-session-hours-text]", root);
+    if (hours && option) hours.textContent = option.dataset.hours ?? "";
     void loadCandles(root);
     void refreshQuote(root);
   });
@@ -1101,7 +1162,10 @@ function initTerminal() {
       // only part a client can act on.
       note(root, refusalText(body), "error");
     } finally {
-      buttons.forEach((b) => b.removeAttribute("disabled"));
+      // Re-enabled only while the market is open; a closed one stays closed.
+      if (root.dataset.sessionOpen !== "false") {
+        buttons.forEach((b) => b.removeAttribute("disabled"));
+      }
     }
   });
 

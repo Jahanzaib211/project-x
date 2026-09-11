@@ -14,6 +14,8 @@
 
 use domain_kernel::quantity::UNIT_SCALE;
 
+use crate::session::SessionKind;
+
 /// One tradable instrument.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Instrument {
@@ -23,6 +25,8 @@ pub struct Instrument {
     pub name: &'static str,
     /// What kind of thing it is, for grouping in the interface.
     pub class: &'static str,
+    /// The calendar it trades on (INV-053).
+    pub session: SessionKind,
     /// Decimal places the instrument is quoted to, e.g. 5 for `EURUSD`.
     ///
     /// This is the price grid. A price that is not a whole multiple of
@@ -132,6 +136,7 @@ pub static INSTRUMENTS: &[Instrument] = &[
         symbol: "EURUSD",
         name: "Euro / US Dollar",
         class: "FX major",
+        session: SessionKind::Fx,
         digits: 5,
         reference_raw: 108_500_000, // 1.08500000
         contract_size: 100_000,
@@ -146,6 +151,7 @@ pub static INSTRUMENTS: &[Instrument] = &[
         symbol: "GBPUSD",
         name: "Pound Sterling / US Dollar",
         class: "FX major",
+        session: SessionKind::Fx,
         digits: 5,
         reference_raw: 127_200_000, // 1.27200000
         contract_size: 100_000,
@@ -160,6 +166,7 @@ pub static INSTRUMENTS: &[Instrument] = &[
         symbol: "AUDUSD",
         name: "Australian Dollar / US Dollar",
         class: "FX major",
+        session: SessionKind::Fx,
         digits: 5,
         reference_raw: 65_800_000, // 0.65800000
         contract_size: 100_000,
@@ -174,6 +181,7 @@ pub static INSTRUMENTS: &[Instrument] = &[
         symbol: "XAUUSD",
         name: "Gold / US Dollar",
         class: "Metal",
+        session: SessionKind::Metals,
         digits: 2,
         reference_raw: 235_000_000_000, // 2350.00000000
         contract_size: 100,
@@ -188,6 +196,7 @@ pub static INSTRUMENTS: &[Instrument] = &[
         symbol: "BTCUSD",
         name: "Bitcoin / US Dollar",
         class: "Crypto",
+        session: SessionKind::Crypto,
         digits: 2,
         reference_raw: 6_820_000_000_000, // 68200.00000000
         contract_size: 1,

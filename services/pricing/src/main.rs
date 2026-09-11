@@ -122,12 +122,15 @@ fn handle(request: &Request, now: u64) -> Option<Response> {
                     Some(Response::json(
                         200,
                         format!(
-                            r#"{{"symbol":"{}","digits":{},"bid":"{}","ask":"{}","mid":"{}","currency":"USD","tick":{tick},"ageMs":{age_ms},"configVersion":"{}","pure":true,"invariants":["INV-060","INV-061","INV-063"]}}"#,
+                            r#"{{"symbol":"{}","digits":{},"bid":"{}","ask":"{}","mid":"{}","currency":"USD","tick":{tick},"ageMs":{age_ms},"session":{},"configVersion":"{}","pure":true,"invariants":["INV-053","INV-060","INV-061","INV-063"]}}"#,
                             escape(instrument.symbol),
                             instrument.digits,
                             escape(&instrument.format_price(bid)),
                             escape(&instrument.format_price(ask)),
                             escape(&instrument.format_price(mid)),
+                            // INV-053 — a client is told the price is frozen
+                            // rather than shown a still number with no reason.
+                            market_core::session::state_json(instrument.session, tick),
                             escape(CONFIG.version),
                         ),
                     ))

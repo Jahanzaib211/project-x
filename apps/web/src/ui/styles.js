@@ -506,6 +506,7 @@ table { border-collapse: collapse; width: 100%; }
 .account-figure { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-3); }
 .account-balance { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .account-balance.unavailable { font-size: 15px; font-weight: 500; color: var(--text-muted); }
+.session-banner { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-2) var(--s-4); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--warning-soft); font-size: 13px; }
 .account.account-new { outline: 2px solid var(--accent); outline-offset: 2px; transition: outline-color 1.2s ease; }
 [data-funding-result][data-tone="ok"] { color: var(--positive); }
 [data-funding-result][data-tone="error"] { color: var(--danger); }

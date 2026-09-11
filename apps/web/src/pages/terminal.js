@@ -17,6 +17,15 @@ import { esc } from "../ui/layout.js";
 import { icon } from "../ui/icons.js";
 
 /**
+ * @typedef {object} TerminalSession
+ * @property {string} kind
+ * @property {boolean} open
+ * @property {number} pricedMs
+ * @property {number|null} nextTransitionMs
+ * @property {string} hours
+ */
+
+/**
  * @typedef {object} TerminalInstrument
  * @property {string} symbol
  * @property {string} name
@@ -24,6 +33,8 @@ import { icon } from "../ui/icons.js";
  * @property {number} digits
  * @property {number} minVolumeMilliLots
  * @property {number} maxVolumeMilliLots
+ * @property {string} [sessionHours]
+ * @property {TerminalSession} [session]
  */
 
 /**
@@ -89,9 +100,9 @@ function symbolOptions(instruments, symbol) {
   return instruments
     .map(
       (instrument) =>
-        `<option value="${esc(instrument.symbol)}"${instrument.symbol === symbol ? " selected" : ""}>${esc(
+        `<option value="${esc(instrument.symbol)}" data-hours="${esc(instrument.sessionHours ?? "")}"${instrument.symbol === symbol ? " selected" : ""}>${esc(
           instrument.symbol,
-        )} — ${esc(instrument.name)}</option>`,
+        )} — ${esc(instrument.name)}${instrument.session && !instrument.session.open ? " (closed)" : ""}</option>`,
     )
     .join("");
 }
@@ -227,14 +238,19 @@ export function terminalPage({
   }
 
   const positions = valuation?.positions ?? [];
-  const digits = instruments.find((i) => i.symbol === symbol)?.digits ?? 5;
+  const chosen = instruments.find((i) => i.symbol === symbol);
+  const digits = chosen?.digits ?? 5;
+  // Rendered from the server's read of the session so the first paint is
+  // already honest about a closed market; the client keeps it current.
+  const closed = chosen?.session ? !chosen.session.open : false;
 
   return `<div class="terminal"
       data-terminal
       data-account="${esc(account)}"
       data-symbol="${esc(symbol)}"
       data-interval="${esc(interval)}"
-      data-digits="${digits}">
+      data-digits="${digits}"
+      data-session-open="${closed ? "false" : "true"}">
 
     <div class="page-head">
       <div class="grow">
@@ -289,6 +305,17 @@ export function terminalPage({
           </div>
         </header>
 
+        <div class="session-banner" data-session-banner data-open="${closed ? "false" : "true"}"${closed ? "" : " hidden"} role="status" aria-live="polite">
+          <span class="badge badge-warning">Market closed</span>
+          <span data-session-text>${closed
+            ? `${esc(symbol)} is closed. Prices are frozen at the last close; orders are refused until it reopens.`
+            : ""}</span>
+          <span class="mono" data-session-countdown></span>
+        </div>
+        <div class="small muted" data-session-hours style="padding:0 var(--s-4) var(--s-2)">
+          Hours: <span data-session-hours-text>${esc(chosen?.sessionHours ?? "")}</span>
+        </div>
+
         <!--
           The canvas carries the drawn data as attributes as well as pixels:
           a chart that renders but plots nothing looks identical to a working
@@ -315,12 +342,12 @@ export function terminalPage({
             </p>
           </div>
 
-          <div class="ticket-actions">
-            <button class="btn btn-sell" type="submit" value="SELL" name="side" data-sell>
+          <div class="ticket-actions" data-ticket-actions>
+            <button class="btn btn-sell" type="submit" value="SELL" name="side" data-sell${closed ? " disabled" : ""}>
               <span class="ticket-side">Sell</span>
               <span class="ticket-price mono" data-sell-price>—</span>
             </button>
-            <button class="btn btn-buy" type="submit" value="BUY" name="side" data-buy>
+            <button class="btn btn-buy" type="submit" value="BUY" name="side" data-buy${closed ? " disabled" : ""}>
               <span class="ticket-side">Buy</span>
               <span class="ticket-price mono" data-buy-price>—</span>
             </button>

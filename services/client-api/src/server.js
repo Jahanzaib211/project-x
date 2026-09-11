@@ -85,7 +85,7 @@ const EXPOSE_OUTBOX = process.env.EXPOSE_OUTBOX !== "false" && process.env.NODE_
 
 /** Paths that are reachable without a session even when AUTH_REQUIRED is set. */
 const PUBLIC_PATHS = new Set([
-  "/health", "/metrics", "/v1/status", "/v1/auth/register", "/v1/auth/login",
+  "/health", "/metrics", "/v1/status", "/v1/sessions", "/v1/auth/register", "/v1/auth/login",
   "/v1/auth/logout", "/v1/auth/session", "/v1/auth/meta",
   // Recovering an account is something you do precisely because you cannot
   // sign in, so these cannot be behind a session.
@@ -936,6 +936,12 @@ async function route(req, res) {
 
   if (path === "/v1/quotes") {
     return send(res, 200, await upstream(UPSTREAM.marketData, "/v1/quotes"));
+  }
+
+  if (path === "/v1/sessions") {
+    // Where every instrument's market stands: open or closed, and when that
+    // next changes (INV-053). Forwarded verbatim.
+    return send(res, 200, await upstream(UPSTREAM.marketData, "/v1/sessions"));
   }
 
   if (path === "/v1/candles") {
