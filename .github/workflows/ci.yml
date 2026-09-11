@@ -1,0 +1,318 @@
+# =============================================================================
+# CI — runs on every push and every pull request
+# =============================================================================
+# Order is deliberate: the cheapest checks that can invalidate everything else
+# run first. A formatting error should never consume a chaos runner, and a
+# module building on unproven ground should never consume anything at all.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # STRUCTURE — the graph, the gates, the docs, the ratchet.
+  # Runs first and blocks everything. Takes seconds.
+  # ---------------------------------------------------------------------------
+  structure:
+    name: "Structure: DAG, gates, docs, regressions"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      # The graph must be a DAG, every declared gate and tier must exist, no
+      # module may omit a non-waivable gate, a module declaring invariants must
+      # require G4, and a module declaring an SLO must require G9.
+      - name: Validate dependency DAG
+        run: python3 scripts/check_dag.py
+
+      # No module may proceed while an upstream dependency is short of its gates.
+      - name: Enforce the gate rule
+        run: python3 scripts/check_gates.py
+
+      # DOCS ARE A GATE. Module pages are generated from registry/modules.yaml.
+      # If the registry changed and the docs were not regenerated, the tree is
+      # inconsistent and the build fails here — on every push, PR and merge.
+      - name: Documentation is in sync with the registry
+        run: |
+          python3 scripts/gen_docs.py --check || {
+            echo "::error::Generated documentation is stale."
+            echo "The registry changed but the docs were not regenerated."
+            echo "Run 'make docs' and commit the result."
+            exit 1
+          }
+
+      # Belt and braces: regenerate and prove git sees no diff. Catches a hand
+      # edit to a generated file, which --check alone would not.
+      - name: No hand edits to generated documentation
+        run: |
+          python3 scripts/gen_docs.py
+          if ! git diff --quiet; then
+            echo "::error::Generated docs differ after regeneration."
+            echo "Someone edited a generated file by hand. Edit the registry instead."
+            git --no-pager diff --stat
+            exit 1
+          fi
+
+      # The repository's memory: nothing that was proven may be quietly lost.
+      - name: Regression ratchet
+        run: python3 scripts/check_regressions.py
+
+      - name: Required documentation is present
+        run: |
+          missing=0
+          for f in README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md LICENSE \
+                   docs/00-overview.md docs/01-principles.md docs/02-architecture.md \
+                   docs/03-dependency-dag.md docs/04-gates.md docs/05-invariants.md \
+                   docs/06-ci-cd.md docs/07-deployment-topology.md docs/08-environments.md \
+                   docs/09-testing-strategy.md docs/10-security.md docs/11-observability.md \
+                   docs/12-data-stores.md docs/13-glossary.md docs/14-roadmap.md \
+                   registry/modules.yaml gates/gates.yaml gates/baseline.json; do
+            [ -f "$f" ] || { echo "::error file=$f::required document is missing"; missing=1; }
+          done
+          exit $missing
+
+  # ---------------------------------------------------------------------------
+  # CHANGELOG — a financial system's changelog is part of the audit trail.
+  # ---------------------------------------------------------------------------
+  changelog:
+    name: Changelog updated
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: A code change requires a changelog entry
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --quiet origin "${{ github.base_ref }}"
+          changed="$(git diff --name-only "$base"...HEAD)"
+          touches_code=$(echo "$changed" | grep -E '^(crates|services|apps|registry|gates)/' || true)
+          touches_log=$(echo "$changed" | grep -E '^CHANGELOG\.md$' || true)
+          if [ -n "$touches_code" ] && [ -z "$touches_log" ]; then
+            echo "::error::This PR changes code or the registry but does not update CHANGELOG.md."
+            echo "Entries for Tier 0/1/2 modules must record modules, gates, approver and invariant impact."
+            exit 1
+          fi
+          echo "changelog check ok"
+
+  # ---------------------------------------------------------------------------
+  # G0 — compile and format
+  # ---------------------------------------------------------------------------
+  g0-format:
+    name: G0 · compile and format
+    runs-on: ubuntu-latest
+    needs: structure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets
+      - name: Lockfile is committed and unchanged
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          git diff --exit-code Cargo.lock || {
+            echo "::error::Cargo.lock changed during the build. Commit it."
+            exit 1
+          }
+
+  # ---------------------------------------------------------------------------
+  # G1 — static correctness, including the project's own rules
+  # ---------------------------------------------------------------------------
+  g1-static:
+    name: G1 · static correctness
+    runs-on: ubuntu-latest
+    needs: structure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy at deny-warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # P1, P2, P4, P6 made mechanical. See docs/01-principles.md.
+      - name: Banned patterns (no floats, no balance mutation, no clock in core)
+        run: ./scripts/banned_patterns.sh
+
+      # Before this step existed, no JavaScript in the tree was checked by
+      # anything at all. tsc runs with checkJs + strict, so a typo'd property
+      # or a possibly-null dereference fails the build.
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+
+      - name: Install JS dev dependencies
+        run: |
+          (cd services/client-api && npm ci)
+          (cd apps/web && npm ci)
+
+      - name: JavaScript syntax and types
+        run: |
+          ./scripts/check_frontend.sh --syntax
+          ./scripts/check_frontend.sh --types
+
+      - name: Dependency vulnerabilities
+        run: |
+          cargo install --locked cargo-audit || true
+          cargo audit || echo "::warning::cargo-audit reported findings"
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false
+
+  # ---------------------------------------------------------------------------
+  # G2/G3/G4 — unit, property, invariants
+  # ---------------------------------------------------------------------------
+  g2-unit:
+    name: G2 · unit tests
+    runs-on: ubuntu-latest
+    needs: [g0-format]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --lib --bins
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Frontend test suites (screens, stylesheet)
+        run: |
+          (cd apps/web && npm ci)
+          ./scripts/check_frontend.sh --tests
+
+      - name: No test was skipped without a linked issue
+        run: |
+          hits="$(grep -rn '#\[ignore\]' crates services 2>/dev/null | grep -v 'issue:' || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::ignored test without a linked issue:"; echo "$hits"; exit 1
+          fi
+
+  g3-property:
+    name: G3 · property-based tests
+    runs-on: ubuntu-latest
+    needs: [g2-unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p invariants -- --nocapture
+        continue-on-error: false
+
+  g4-invariants:
+    name: G4 · domain invariants (the financial laws)
+    runs-on: ubuntu-latest
+    needs: [g2-unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install --quiet pyyaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A module may not declare a law it does not run.
+      - name: Every declared invariant is implemented
+        run: python3 scripts/check_invariant_coverage.py
+
+      - name: Foundation invariants (INV-900..902)
+        run: ./scripts/check_foundation_invariants.sh
+
+      - name: Client area invariants (INV-180..184, INV-190..191)
+        run: ./scripts/check_client_area_invariants.sh
+
+      - run: cargo test -p invariants -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # G5 — integration on real dependencies, in the real compose stack
+  # ---------------------------------------------------------------------------
+  g5-integration:
+    name: G5 · integration
+    runs-on: ubuntu-latest
+    needs: [g2-unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compose config is valid
+        run: |
+          cp .env.example .env
+          docker compose --profile all config --quiet
+
+      - name: Start infrastructure
+        run: |
+          docker compose --profile infra up -d
+          timeout 180 bash -c 'until docker compose ps --format json | grep -q healthy; do sleep 3; done'
+
+      - name: Schema applies cleanly
+        run: docker compose exec -T postgres psql -U projectx -d projectx -c '\dt events.*'
+
+      # The database is the last line of defence. Prove it actually rejects an
+      # unbalanced transaction, rather than trusting that it would.
+      - name: Ledger rejects an unbalanced transaction (INV-020)
+        run: ./scripts/verify_ledger_constraints.sh
+
+      - name: Teardown
+        if: always()
+        run: docker compose --profile all down -v
+
+  # ---------------------------------------------------------------------------
+  # Container images build (does not push from a PR)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: [g1-static, g2-unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build all service images
+        run: |
+          cp .env.example .env
+          docker compose --profile core --profile edge --profile web build
+
+  # ---------------------------------------------------------------------------
+  # Single required status for branch protection.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: All gates
+    runs-on: ubuntu-latest
+    needs: [structure, g0-format, g1-static, g2-unit, g3-property, g4-invariants, g5-integration, build]
+    if: always()
+    steps:
+      - name: Fail if any gate failed
+        run: |
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": *"failure"'; then
+            echo "::error::One or more gates failed. Nothing merges."
+            exit 1
+          fi
+          echo "All gates green."

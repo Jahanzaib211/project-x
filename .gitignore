@@ -1,0 +1,50 @@
+# Secrets — never committed. Names and descriptions live in .env.example.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Local artifacts
+/tmp/
+*.log
+coverage/
+bench-results/
+
+# NEVER commit production or client data, in any form.
+*.dump
+*.sql.gz
+fixtures/production/
+
+# Services run from this tree by scripts/dev_stack.sh
+.run/
+
+# Playwright's own output: traces, videos and failure screenshots. Regenerated
+# by every run of the end-to-end suite, and some of it is large.
+tests/e2e/test-results/
+tests/e2e/playwright-report/

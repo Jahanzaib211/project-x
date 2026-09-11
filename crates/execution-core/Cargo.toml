@@ -1,0 +1,28 @@
+[package]
+name = "execution-core"
+description = "11-execution — an accepted order becomes one atomic, balanced transaction."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dependencies mirror this module's `depends_on` in registry/modules.yaml.
+# The graph is enforced by the compiler as well as by scripts/check_dag.py.
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+event-kernel = { path = "../event-kernel" }
+ledger-core = { path = "../ledger-core" }
+position-core = { path = "../position-core" }
+market-core = { path = "../market-core" }
+# 11-execution reaches 09-risk through 10-oms in the registry graph. The
+# dependency is direct here because INV-103 is enforced by the type system: a
+# deal cannot be built without a `risk_core::Approval`, and that type has no
+# public constructor.
+risk-core = { path = "../risk-core" }
+
+[dev-dependencies]
+# Fixtures value an account so they can obtain a real risk approval.
+pnl-margin = { path = "../pnl-margin" }
+
+[lints]
+workspace = true

@@ -1,0 +1,723 @@
+# =============================================================================
+# PROJECT X — MODULE REGISTRY
+# =============================================================================
+# Single source of truth for:
+#   - the dependency DAG            (scripts/check_dag.py)
+#   - the CI gate matrix            (scripts/check_gates.py, .github/workflows/ci.yml)
+#   - the generated module docs     (scripts/gen_docs.py -> docs/modules/)
+#   - the README status matrix      (scripts/gen_docs.py -> README.md marker block)
+#
+# Nothing downstream may be built, merged or deployed unless every module it
+# depends on has passed that module's own required gates. This file is what
+# makes that rule mechanically checkable instead of a matter of memory.
+# =============================================================================
+
+version: 1
+
+tiers:
+  T0: { name: "Financial Core",         blast_radius: "money is wrong",              change_policy: "manual release approval, two reviewers, replay + reconciliation clean" }
+  T1: { name: "Market Infrastructure",  blast_radius: "prices/liquidity are wrong",  change_policy: "manual release approval, perf gate mandatory" }
+  T2: { name: "Financial Operations",   blast_radius: "settlement is wrong",         change_policy: "manual release approval, reconciliation clean" }
+  T3: { name: "Compliance",             blast_radius: "regulatory breach",           change_policy: "compliance owner approval" }
+  T4: { name: "Experience",             blast_radius: "clients inconvenienced",      change_policy: "automated canary, auto-promote" }
+
+modules:
+
+  # ---------------------------------------------------------------- Tier: base
+  - id: "00-foundation"
+    name: "Engineering Foundation"
+    tier: T0
+    status: in-progress
+    depends_on: []
+    required_gates: [G0, G1, G2, G4]
+    release_approval: auto
+    purpose: >
+      The substrate every other module is built and shipped on: monorepo layout,
+      reproducible builds, pinned dependencies, CI runners, artifact registry and
+      signing, secret management, and the local Docker Compose environment that
+      makes the whole system reproducible on one machine.
+    inputs: []
+    outputs: ["signed container images", "SBOM", "pinned lockfiles", "dev/test environments"]
+    builds:
+      - "monorepo + workspace tooling (cargo workspace, pnpm workspace)"
+      - "Docker Compose environment with profiles (infra/core/edge/web/obs)"
+      - "CI pipeline definitions and the gate runner"
+      - "artifact build, SBOM generation, image signing"
+      - "secret management and configuration loading"
+      - "structured logging, tracing and metrics bootstrap"
+    invariants:
+      - "INV-900: every dependency is pinned and its lockfile committed; a build is reproducible from the commit alone."
+      - "INV-901: no secret is present in a tracked file, and the secret scanner detects a planted canary."
+      - "INV-902: the runtime image runs as a non-root user and carries no shell or package manager."
+    tests:
+      - "toolchain bootstrap smoke test"
+      - "compose up -> all healthchecks green"
+      - "secret scanner finds a planted canary secret"
+    failure_modes:
+      - "unpinned dependency silently changes financial behaviour between builds"
+      - "CI green on a stale cache rather than the real tree"
+    notes: >
+      Deploys to DEV and STAGING only. This module never deploys to production
+      by itself; it is the thing that deploys everything else.
+
+  - id: "01-domain-kernel"
+    name: "Domain Kernel (types + math)"
+    tier: T0
+    status: in-progress
+    depends_on: ["00-foundation"]
+    required_gates: [G0, G1, G2, G3, G4]
+    release_approval: manual
+    purpose: >
+      The vocabulary of the business, expressed as types that make illegal states
+      unrepresentable. Money, Currency, Price, Quantity, Lot, Symbol, and the
+      arithmetic over them. This is the most important module in the system: every
+      financial error downstream is either an error here or an error that this
+      module failed to make impossible.
+    inputs: []
+    outputs: ["Money", "Currency", "Price", "Quantity", "Lot", "Symbol", "Side", "Rounding"]
+    builds:
+      - "fixed-point decimal representation with explicit scale per currency"
+      - "checked arithmetic: no silent overflow, no silent truncation"
+      - "currency-tagged Money that refuses cross-currency arithmetic"
+      - "explicit, named rounding policies applied at documented boundaries"
+      - "serialization that is exact and round-trip stable"
+    invariants:
+      - "INV-001: Money arithmetic never uses IEEE-754 floating point."
+      - "INV-002: a + b == b + a for Money of the same currency."
+      - "INV-003: (a + b) - b == a exactly, under the declared rounding policy."
+      - "INV-004: Money of different currencies cannot be added; it is a compile-time error."
+      - "INV-005: every rounding operation names its policy and its scale."
+    tests:
+      - "property: commutativity, associativity, identity, inverse"
+      - "property: round-trip serialization is exact"
+      - "boundary: min/max representable, zero, negative, scale limits"
+      - "fuzz: arbitrary operation sequences never panic and never overflow silently"
+    failure_modes:
+      - "float creeps in through a third-party library or a JSON boundary"
+      - "rounding applied twice, or applied at an undocumented boundary"
+    notes: >
+      No downstream financial module may be merged until this module is at G4.
+      Enforced by scripts/check_gates.py.
+
+  - id: "02-event-kernel"
+    name: "Event Kernel (identity, clock, envelope)"
+    tier: T0
+    status: in-progress
+    depends_on: ["01-domain-kernel"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6]
+    release_approval: manual
+    purpose: >
+      One envelope, one clock, one identity scheme for every fact the system
+      records. Everything that follows — the ledger, positions, risk, execution —
+      is a fold over this event stream, so replay determinism is decided here.
+    inputs: ["domain kernel types"]
+    outputs: ["Event envelope", "EventId", "AggregateId", "sequence", "correlation/causation ids"]
+    builds:
+      - "event envelope: event_id, event_type, aggregate_id, sequence, timestamp, correlation_id, causation_id, schema_version, payload"
+      - "monotonic per-aggregate sequence with optimistic concurrency"
+      - "idempotency keys and a dedupe index for externally-sourced events"
+      - "deterministic canonical serialization (byte-stable)"
+      - "schema registry with forward/backward compatibility checks"
+      - "append-only event store with a replay cursor"
+    invariants:
+      - "INV-010: event_id is globally unique; a duplicate append is a no-op, not a second effect."
+      - "INV-011: per-aggregate sequence is gapless and strictly increasing."
+      - "INV-012: the event log is append-only; no update, no delete, no reordering."
+      - "INV-013: canonical serialization is byte-identical for identical logical content."
+      - "INV-014: replaying the log from genesis reproduces byte-identical state."
+    tests:
+      - "duplicate event append is idempotent"
+      - "out-of-order and late-arriving events are rejected or parked, never silently applied"
+      - "sequence gap detection"
+      - "schema evolution: old events still decode after N schema versions"
+      - "replay equivalence: fold(log) == live state"
+    failure_modes:
+      - "wall-clock time used for ordering instead of sequence"
+      - "map/set iteration order leaking into serialization and breaking determinism"
+    notes: >
+      Wall-clock timestamps are metadata, never ordering. Ordering is sequence.
+
+  - id: "03-ledger"
+    name: "Double-Entry Ledger"
+    tier: T0
+    status: in-progress
+    depends_on: ["02-event-kernel"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8]
+    release_approval: manual
+    purpose: >
+      The financial source of truth. Every movement of value in the system is a
+      balanced double-entry transaction here. Balances are projections; the
+      journal is the truth.
+    inputs: ["events", "posting rules"]
+    outputs: ["accounts", "journals", "journal entries", "balances", "audit trail"]
+    builds:
+      - "chart of accounts (client, house, PSP, LP, suspense, P&L, fees)"
+      - "immutable journal + journal entries"
+      - "posting rules as declarative, testable data"
+      - "balance projections rebuildable from the journal"
+      - "reversal and correction entries (never mutation)"
+      - "multi-currency with explicit FX legs"
+    invariants:
+      - "INV-020: for every transaction, sum(debits) == sum(credits), exactly."
+      - "INV-021: for every currency within a transaction, debits == credits."
+      - "INV-022: a journal entry is never updated or deleted; corrections are new balanced entries."
+      - "INV-023: balance(account) == fold(journal entries for that account), always."
+      - "INV-024: the ledger after crash recovery is identical to the ledger before the crash."
+    tests:
+      - "property: 1,000,000 randomly generated transactions keep debits == credits"
+      - "chaos: kill -9 mid-transaction, restart, assert ledger equality"
+      - "chaos: database failover mid-transaction"
+      - "rebuild: drop all balance projections, replay, assert identical balances"
+      - "concurrency: N writers on one account produce a consistent, gapless journal"
+    failure_modes:
+      - "a partially-applied transaction survives a crash"
+      - "a projection drifts from the journal and nobody notices"
+    notes: >
+      Crash-recovery equality is a hard release blocker, not a warning.
+
+  - id: "04-account"
+    name: "Account Engine"
+    tier: T0
+    status: in-progress
+    depends_on: ["03-ledger"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6]
+    release_approval: manual
+    purpose: >
+      Account identity, lifecycle and the balance-side view of a client: balance,
+      equity, available balance, status, currency, leverage and permissions.
+    inputs: ["ledger", "events"]
+    outputs: ["AccountState", "available balance", "account status transitions"]
+    builds:
+      - "account lifecycle state machine (pending, active, restricted, frozen, closed)"
+      - "balance / available-balance projection over the ledger"
+      - "reservations and holds (withdrawal reservation, margin hold)"
+      - "per-account leverage and trading permission configuration"
+      - "fees and adjustments"
+    invariants:
+      - "INV-030: available balance == balance - reservations - used margin; never negative without an explicit deficit event."
+      - "INV-031: no balance mutation exists without a corresponding ledger transaction."
+      - "INV-032: a frozen or closed account cannot originate new financial effects."
+    tests:
+      - "deposit, withdrawal reservation, release, fee, adjustment"
+      - "freeze and close blocks every mutating path"
+      - "reservation double-release is idempotent"
+    failure_modes:
+      - "balance updated directly instead of via the ledger"
+      - "reservation leaked on a failed withdrawal"
+
+  - id: "05-position"
+    name: "Position Engine"
+    tier: T0
+    status: in-progress
+    depends_on: ["04-account"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7]
+    release_approval: manual
+    purpose: >
+      Position lifecycle and realized P&L: open, increase, decrease, reverse,
+      close, hedge and net, with exact average-price and quantity accounting.
+    inputs: ["deals", "account state", "domain types"]
+    outputs: ["Position", "realized P&L", "average price", "exposure per symbol"]
+    builds:
+      - "netting and hedging position models (configurable per account)"
+      - "average price computation with declared rounding"
+      - "partial close, multi-fill aggregation, position reversal"
+      - "realized P&L posting into the ledger"
+    invariants:
+      - "INV-040: quantity is conserved — sum(fills) == position delta, exactly."
+      - "INV-041: every position mutation has exactly one originating event."
+      - "INV-042: realized P&L on close equals the ledger postings for that close."
+      - "INV-043: closing a position to zero leaves no residual quantity or residual average price."
+    tests:
+      - "property: random fill sequences conserve quantity and P&L"
+      - "partial closes summing to the full position equal one full close"
+      - "reversal through zero produces two positions, not one corrupt one"
+    failure_modes:
+      - "average price drift from repeated rounding on partial fills"
+      - "reversal handled as a single signed mutation, losing the realized leg"
+
+  # ------------------------------------------------------- Tier: market infra
+  - id: "06-market-data"
+    name: "Market Data"
+    tier: T1
+    status: in-progress
+    depends_on: ["02-event-kernel"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G9]
+    release_approval: manual
+    purpose: >
+      Raw provider feeds turned into one canonical, validated, timestamped market
+      state. Everything price-dependent downstream reads this and nothing else.
+    inputs: ["LP feeds", "reference data"]
+    outputs: ["canonical order book", "MarketState snapshot + delta stream"]
+    builds:
+      - "feed adapters -> decoder -> normalizer -> validator -> canonical book"
+      - "per-symbol staleness tracking and explicit stale marking"
+      - "sequence-gap detection, resync and reconnect"
+      - "market state snapshots for deterministic replay"
+    invariants:
+      - "INV-050: a quote that fails validation never reaches the canonical book."
+      - "INV-051: market state carries an explicit freshness age; consumers must be able to reject stale state."
+      - "INV-052: the canonical book is reproducible from the recorded feed."
+    tests:
+      - "stale feed, duplicate quote, out-of-order quote, sequence gap"
+      - "crossed market, negative price, zero price, absurd spread"
+      - "disconnect / reconnect / resync under load"
+      - "recorded-feed replay produces an identical book"
+    failure_modes:
+      - "stale price silently used as live"
+      - "one bad provider poisoning the canonical book"
+    slo:
+      note: "Latency targets are established by benchmark on target hardware, not guessed. See docs/09-testing-strategy.md."
+      metrics: ["p99 tick->state latency", "p99.9 tick->state latency", "throughput ticks/s", "allocations/tick"]
+
+  - id: "07-pricing"
+    name: "Pricing Engine"
+    tier: T1
+    status: in-progress
+    depends_on: ["06-market-data", "01-domain-kernel"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      MarketState + configuration -> ClientQuote. Markup, spread policy, symbol
+      configuration and tiering. A pure function, so it can be replayed and proven.
+    inputs: ["MarketState", "pricing configuration", "client tier"]
+    outputs: ["ClientQuote"]
+    builds:
+      - "pure pricing function (no I/O, no clock reads, no hidden state)"
+      - "markup / spread / tier configuration as versioned data"
+      - "stale-input and invalid-market rejection"
+      - "quote identity and quote expiry"
+    invariants:
+      - "INV-060: identical (MarketState, config) input yields byte-identical ClientQuote output."
+      - "INV-061: bid <= ask on every emitted quote, unless the model explicitly permits and labels a crossed state."
+      - "INV-062: a quote derived from stale market state is never emitted as live."
+      - "INV-063: every quote is attributable to the exact config version and market state that produced it."
+    tests:
+      - "determinism: same input, same output, across processes and machines"
+      - "property: bid <= ask; markup monotonicity"
+      - "rejection of stale, crossed and invalid inputs"
+      - "hot-path performance gate"
+    failure_modes:
+      - "config hot-reload racing a quote computation"
+      - "clock read inside the pricing function breaking replay"
+
+  - id: "08-pnl-margin"
+    name: "P&L and Margin"
+    tier: T0
+    status: in-progress
+    depends_on: ["05-position", "07-pricing"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      Unrealized P&L, equity, used margin, free margin and margin level — the
+      numbers that decide whether a client can trade and when they get liquidated.
+    inputs: ["positions", "quotes", "account state", "margin policy"]
+    outputs: ["UPNL", "equity", "used margin", "free margin", "margin level"]
+    builds:
+      - "equity = balance + unrealized P&L"
+      - "free margin = equity - used margin"
+      - "margin level = equity / used margin, with defined behaviour at zero used margin"
+      - "per-symbol and portfolio margin models as versioned policy"
+      - "multi-currency conversion with an explicit, recorded FX rate"
+    invariants:
+      - "INV-070: equity == balance + sum(unrealized P&L of open positions)."
+      - "INV-071: used margin == sum(per-position margin) under the active policy."
+      - "INV-072: margin level at zero used margin is defined and documented, never a division fault."
+      - "INV-073: every P&L figure is reproducible from (positions, quotes, policy version)."
+    tests:
+      - "boundary: zero margin, zero equity, negative equity, precision limits"
+      - "multi-currency accounts with FX moves"
+      - "historical replay against recorded market data"
+      - "price-gap scenarios (weekend gaps, halts)"
+    failure_modes:
+      - "unrealized P&L computed from a stale or mismatched quote"
+      - "FX rate chosen at read time instead of recorded at computation time"
+
+  - id: "09-risk"
+    name: "Risk Engine"
+    tier: T0
+    status: in-progress
+    depends_on: ["08-pnl-margin"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      The gatekeeper. Given account state, market state, an order intent and a
+      risk policy, it returns ALLOW, REJECT, REDUCE or LIQUIDATE — deterministically.
+    inputs: ["AccountState", "MarketState", "OrderIntent", "RiskPolicy"]
+    outputs: ["ALLOW", "REJECT", "REDUCE", "LIQUIDATE", "decision rationale"]
+    builds:
+      - "pure decision function over an explicit input snapshot"
+      - "versioned, auditable risk policy"
+      - "pre-trade checks: margin, exposure, symbol, session, permission, limits"
+      - "liquidation and stop-out policy"
+      - "full decision rationale recorded as an event"
+    invariants:
+      - "INV-080: identical inputs and policy version produce an identical decision. Always."
+      - "INV-081: every decision records the exact input snapshot and policy version that produced it."
+      - "INV-082: no order reaches execution without a recorded risk decision."
+      - "INV-083: risk failure is closed, not open — an unavailable risk engine rejects, never allows."
+    tests:
+      - "property + fuzz over the whole input space"
+      - "boundary: exactly-at-limit, one-tick-over, zero-equity, stale-market"
+      - "historical replay of recorded production-shaped input"
+      - "race: concurrent intents on one account cannot both pass a single-slot limit"
+      - "stress: decision latency under liquidation storms"
+    failure_modes:
+      - "risk reads live mutable state mid-decision instead of a snapshot"
+      - "fail-open on a dependency timeout"
+    notes: "Manual release approval required, always, even with every gate green."
+
+  - id: "10-oms"
+    name: "Order Management System"
+    tier: T0
+    status: in-progress
+    depends_on: ["09-risk"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      The order state machine and its guarantees: every order has exactly one
+      lifecycle, every transition is recorded, and no transition can be skipped.
+    inputs: ["order intents", "risk decisions", "executions"]
+    outputs: ["Order", "order state transitions", "client order events"]
+    builds:
+      - "state machine: NEW -> VALIDATING -> RISK_CHECK -> ACCEPTED -> EXECUTING -> FILLED/PARTIAL -> POSITION_UPDATED -> SETTLED"
+      - "terminal states: REJECTED, CANCELLED, EXPIRED"
+      - "client idempotency keys"
+      - "cancel/replace with race resolution"
+      - "timeout, retry and reconciliation of unknown-state orders"
+    invariants:
+      - "INV-090: an order occupies exactly one state at a time; every transition is legal and recorded."
+      - "INV-091: a client order id maps to at most one order, forever."
+      - "INV-092: a cancel that races a fill resolves to exactly one outcome, never both."
+      - "INV-093: an order in an unknown execution state is never assumed to be either filled or unfilled."
+    tests:
+      - "exhaustive legal/illegal transition matrix"
+      - "duplicate order submission, duplicate execution report"
+      - "cancel/fill race, timeout, disconnect, late execution report"
+      - "retry storm produces exactly one order"
+    failure_modes:
+      - "timeout treated as rejection while the venue actually filled"
+      - "retry creating a second order under a new id"
+
+  - id: "11-execution"
+    name: "Execution Core"
+    tier: T0
+    status: in-progress
+    depends_on: ["10-oms", "03-ledger", "05-position"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      The critical path: order -> risk -> execution -> deal -> position -> ledger,
+      with exactly-once financial effect under retries, crashes and partitions.
+    inputs: ["accepted orders", "fills", "quotes"]
+    outputs: ["Deal", "position updates", "ledger postings", "execution reports"]
+    builds:
+      - "transactional outbox / inbox for exactly-once effects"
+      - "deal construction: price, quantity, commission, swap, fees"
+      - "atomic commit of deal + position + ledger effects"
+      - "compensating actions that are themselves recorded and balanced"
+    invariants:
+      - "INV-100: every execution produces exactly one financial deal."
+      - "INV-101: every deal produces exactly one balanced set of ledger postings."
+      - "INV-102: network retries are safe; financial effects are not repeatable."
+      - "INV-103: no deal exists without an originating order and a recorded risk decision."
+      - "INV-104: a crash at any point leaves the system in a state that replay reproduces exactly."
+    tests:
+      - "exactly-once under duplicate execution reports"
+      - "fault injection at every commit boundary"
+      - "process kill, database failure, network partition, clock skew"
+      - "replay equivalence after each injected fault"
+      - "race: concurrent fills on one position"
+    failure_modes:
+      - "commission charged twice on a retried execution"
+      - "one fill recorded as two deals"
+    notes: "Explicit signoff required for production. No exceptions, ever."
+
+  - id: "12-risk-book"
+    name: "Internal Risk Book"
+    tier: T1
+    status: planned
+    depends_on: ["11-execution"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G9]
+    release_approval: manual
+    purpose: >
+      The broker's own exposure: net and gross exposure by symbol, currency and
+      client, plus concentration and inventory — the input to every hedge decision.
+    inputs: ["deals", "positions", "market state"]
+    outputs: ["net exposure", "gross exposure", "symbol/currency exposure", "concentration metrics"]
+    builds:
+      - "client book aggregation and netting"
+      - "broker inventory and internalization accounting"
+      - "exposure limits and breach alerting"
+      - "concentration by client, symbol and currency"
+    invariants:
+      - "INV-110: risk book exposure == aggregate of client positions minus hedges, at all times."
+      - "INV-111: every exposure figure is reconcilable to the position engine and the ledger."
+    tests:
+      - "aggregation and netting against a reference implementation"
+      - "hedge reconciliation"
+      - "limit breach detection under rapid position churn"
+
+  - id: "13-lp-connectivity"
+    name: "LP / FIX Connectivity"
+    tier: T1
+    status: planned
+    depends_on: ["06-market-data", "10-oms"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+    release_approval: manual
+    purpose: >
+      A vendor-neutral LiquidityProvider interface with per-LP adapters. The core
+      never learns a vendor's protocol dialect.
+    inputs: ["LP sessions", "orders"]
+    outputs: ["quotes", "executions", "LP health"]
+    builds:
+      - "LiquidityProvider trait: connect, subscribe, send_order, cancel, receive_execution, heartbeat"
+      - "per-LP adapters behind that one interface"
+      - "FIX session management: sequence numbers, resend, gap fill, logon/logout"
+      - "a simulated LP for CI that implements the full contract"
+      - "LP health scoring and circuit breaking"
+    invariants:
+      - "INV-120: the core depends only on the LP interface, never on a vendor dialect."
+      - "INV-121: FIX sequence gaps are detected and resolved, never skipped."
+      - "INV-122: an LP execution report is applied exactly once."
+    tests:
+      - "contract suite run identically against every adapter and the simulator"
+      - "connect, disconnect, reconnect, heartbeat timeout"
+      - "ack, reject, fill, partial fill, cancel, cancel-reject, sequence gap"
+      - "adapter-level fuzzing of malformed messages"
+    failure_modes:
+      - "vendor quirk handled in the core instead of the adapter"
+      - "resend request loop after a sequence reset"
+
+  - id: "14-hedging"
+    name: "Routing and Hedging"
+    tier: T1
+    status: planned
+    depends_on: ["12-risk-book", "13-lp-connectivity"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G9]
+    release_approval: manual
+    purpose: >
+      Decides what to hedge, where, and when — from exposure, liquidity, LP health
+      and risk policy — and never lies to itself about whether a hedge worked.
+    inputs: ["exposure", "LP liquidity", "LP health", "hedge policy"]
+    outputs: ["hedge decisions", "hedge orders", "hedge fills"]
+    builds:
+      - "A-book / B-book / hybrid routing policy as versioned data"
+      - "hedge sizing and throttling"
+      - "LP selection by health, latency and cost"
+      - "hedge failure handling and escalation"
+    invariants:
+      - "INV-130: a failed hedge is never recorded as a successful hedge."
+      - "INV-131: hedge state is always one of pending, filled, partially-filled, failed — never unknown-and-ignored."
+      - "INV-132: routing decisions are deterministic given inputs and policy version."
+    tests:
+      - "LP unavailable, stale, rejecting, partially filling, latency-spiking"
+      - "market gap during an in-flight hedge"
+      - "policy version change mid-flight"
+
+  # -------------------------------------------------------- Tier: financial ops
+  - id: "15-reconciliation"
+    name: "Reconciliation"
+    tier: T2
+    status: planned
+    depends_on: ["03-ledger", "11-execution"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8]
+    release_approval: manual
+    purpose: >
+      Continuous three-way (and more) agreement between the ledger, the trading
+      engine, the risk book, LPs, banks and PSPs. Starts early — long before
+      payments exist — because it is how you learn the core is actually correct.
+    inputs: ["ledger", "engine state", "risk book", "LP statements", "bank/PSP statements"]
+    outputs: ["MATCHED", "MISMATCH", "MISSING", "DUPLICATE", "TIMING_DIFFERENCE", "break reports"]
+    builds:
+      - "pluggable reconciliation sources and matching rules"
+      - "break classification and aging"
+      - "automated break investigation trails"
+      - "daily financial close process"
+    invariants:
+      - "INV-140: every break is either explained or open; there is no third category."
+      - "INV-141: zero unexplained financial discrepancies is a hard release gate."
+      - "INV-142: reconciliation is read-only against the financial core."
+    tests:
+      - "injected breaks of each class are detected and classified correctly"
+      - "timing differences do not raise false mismatches"
+      - "reconciliation over a full replayed trading day"
+
+  - id: "16-kyc-aml"
+    name: "KYC / AML / Fraud"
+    tier: T3
+    status: planned
+    depends_on: ["04-account"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G8]
+    release_approval: manual
+    purpose: >
+      Identity, verification, sanctions and PEP screening, transaction monitoring,
+      device and withdrawal risk, and account linking. Developable in parallel with
+      the trading core from module 04 onward.
+    inputs: ["identity documents", "account events", "payment events", "compliance rules"]
+    outputs: ["verification status", "screening results", "risk scores", "case files"]
+    builds:
+      - "identity capture and document verification provider adapters"
+      - "sanctions / PEP / adverse media screening"
+      - "ongoing transaction monitoring rules"
+      - "device fingerprint and behavioural risk"
+      - "case management and audit logging"
+    invariants:
+      - "INV-150: no withdrawal is released for an account failing required verification."
+      - "INV-151: every automated decision is explainable and permanently auditable."
+      - "INV-152: screening provider outage fails closed for onboarding, never open."
+    tests:
+      - "provider contract tests against recorded fixtures"
+      - "decision tests including deliberate false-positive scenarios"
+      - "audit log completeness"
+
+  - id: "17-payments"
+    name: "Payments and Treasury"
+    tier: T2
+    status: planned
+    depends_on: ["03-ledger", "16-kyc-aml", "15-reconciliation"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8]
+    release_approval: manual
+    purpose: >
+      Money in and money out, as a state machine over the ledger — never as a
+      direct balance mutation.
+    inputs: ["PSP events", "bank events", "withdrawal requests", "KYC status"]
+    outputs: ["payment state transitions", "ledger postings", "treasury positions"]
+    builds:
+      - "payment state machine: INITIATED -> PENDING -> AUTHORIZED -> SETTLED, plus FAILED / REVERSED / REFUNDED"
+      - "PSP and bank adapters behind one interface"
+      - "withdrawal approval workflow with holds"
+      - "treasury: liquidity placement, client-money segregation, safeguarding"
+      - "chargeback and reversal handling"
+    invariants:
+      - "INV-160: no code path performs `account.balance += x`; all money moves through the ledger."
+      - "INV-161: every payment state transition is idempotent under provider retries and duplicate webhooks."
+      - "INV-162: client money is segregated from house money at the account level in the chart of accounts."
+      - "INV-163: a reversal is a new balanced transaction, never a deletion."
+    tests:
+      - "duplicate webhook delivery, out-of-order webhook delivery"
+      - "provider timeout then late success"
+      - "reversal, refund and chargeback flows"
+      - "settlement reconciliation against a bank statement fixture"
+
+  - id: "18-compliance"
+    name: "Compliance and Reporting"
+    tier: T3
+    status: planned
+    depends_on: ["15-reconciliation", "16-kyc-aml", "17-payments"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G8]
+    release_approval: manual
+    purpose: >
+      Read-only consumption of the whole event stream to produce regulatory
+      reports, audit trails, client statements and surveillance.
+    inputs: ["all domain events"]
+    outputs: ["regulatory reports", "audit trails", "client statements", "risk reports", "surveillance alerts"]
+    builds:
+      - "reporting projections in an analytical store"
+      - "regulatory report generation and submission adapters"
+      - "client statement generation"
+      - "trade surveillance rules"
+      - "record retention and legal hold"
+    invariants:
+      - "INV-170: compliance never writes to the financial core."
+      - "INV-171: any report is reproducible from the event log at a stated point in time."
+      - "INV-172: retention and legal hold cannot be bypassed by a normal deletion path."
+    tests:
+      - "report reproducibility from a replayed log"
+      - "point-in-time correctness (as-of reporting)"
+      - "surveillance rule fixtures"
+
+  # ---------------------------------------------------------- Tier: experience
+  - id: "19-client-api"
+    name: "Client API"
+    tier: T4
+    status: in-progress
+    depends_on: ["10-oms", "04-account", "05-position", "07-pricing"]
+    required_gates: [G0, G1, G2, G3, G4, G5, G8, G9]
+    release_approval: auto
+    purpose: >
+      The first outward-facing surface: REST for commands and queries, WebSocket
+      for streams, webhooks for integrations. Owns no financial truth.
+    inputs: ["core services"]
+    outputs: ["REST API", "WebSocket streams", "webhooks", "OpenAPI + AsyncAPI schemas"]
+    builds:
+      - "REST: orders, positions, account, ledger, withdrawals"
+      - "WebSocket: quotes, orders, executions, positions, account state"
+      - "authentication, authorization, scopes"
+      - "outbox delivery over SMTP, drained by a worker"
+      - "rate limiting and quota"
+      - "request idempotency keys"
+      - "versioned, compatibility-checked public schemas"
+    invariants:
+      - "INV-180: the API never computes a financial figure; it forwards what the core computed."
+      - "INV-181: every mutating endpoint is idempotent under a client-supplied key."
+      - "INV-182: a published API schema version never changes meaning."
+      - "INV-183: an unavailable financial figure is returned as null with the module responsible for it, never as a substituted zero."
+      - "INV-184: the client-area store holds no balance, equity or margin column; financial state is read from the core, never kept at the edge."
+      - "INV-185: no credential is stored in a recoverable form; a password is a scrypt digest and a session token is held only as its SHA-256."
+      - "INV-186: a refused sign-in is identical whether the address is registered or not, in wording and in work done."
+      - "INV-187: a session reaches only the rows its own user owns; every session statement is scoped by that user or by a digest the caller proved they hold."
+      - "INV-188: client isolation is enforced by the database, not the application: the serving roles cannot bypass row-level security, an unscoped query returns no rows, and writing a row owned by another client is refused."
+      - "INV-189: a password reset is a single-use, expiring token, stored only as a digest, and completing one revokes every session of that account."
+    tests:
+      - "authz matrix per endpoint and scope"
+      - "rate limit and quota enforcement"
+      - "idempotency replay"
+      - "schema backward-compatibility check against the published version"
+      - "password hashing, TOTP (RFC 6238 vectors) and policy, as unit tests"
+      - "row-level security proved against the database as the application's own role"
+      - "password reset end to end: request, single use, expiry, session revocation"
+      - "a reset link delivered over SMTP and followed from the message body"
+      - "registration, sign-in, lockout, session revocation and account isolation, end to end in a browser"
+
+  - id: "20-web"
+    name: "Web and Mobile"
+    tier: T4
+    status: in-progress
+    depends_on: ["19-client-api"]
+    required_gates: [G0, G1, G2, G4, G5, G8]
+    release_approval: auto
+    purpose: >
+      Presentation only. The trading terminal, account area and back office read
+      the API and render it.
+    inputs: ["client api"]
+    outputs: ["web app", "mobile app", "back office"]
+    builds:
+      - "trading terminal (quotes, ticket, blotter, positions)"
+      - "account area (funding, statements, profile, verification)"
+      - "sign-in, registration, sessions and two-factor authentication"
+      - "operator console (apps/ops) — separate app, separate port, separate deploy"
+      - "back office / admin console"
+      - "design system and accessibility baseline"
+    invariants:
+      - "INV-190: the UI never owns financial truth and never computes a balance or P&L locally except as a labelled optimistic preview."
+      - "INV-191: the rendered page contains no financial figure that did not come from the API, and performs no arithmetic on money."
+      - "INV-192: the session token is never reachable by script; it lives in an HttpOnly, SameSite cookie and appears in no response body, URL or browser store."
+    tests:
+      - "component and E2E suites against a stubbed API"
+      - "accessibility checks"
+      - "visual regression"
+      - "the auth screens render, refuse and explain themselves, signed in and signed out"
+      - "the sign-in and registration forms complete with JavaScript disabled"
+      - "the operator console renders every screen, escapes client-supplied text, and refuses a forged session"
+
+  - id: "21-external"
+    name: "External Platform Integrations (MT5 et al.)"
+    tier: T4
+    status: planned
+    depends_on: ["19-client-api"]
+    required_gates: [G0, G1, G2, G4, G5, G6, G8]
+    release_approval: manual
+    purpose: >
+      Third-party trading platforms treated as clients of the broker, behind an
+      adapter. MT5 is an integration, not the broker.
+    inputs: ["client api", "platform gateways"]
+    outputs: ["platform adapters", "bridge state", "reconciliation feeds"]
+    builds:
+      - "platform adapter interface and per-platform implementations"
+      - "symbol, account and order mapping tables"
+      - "bidirectional reconciliation between platform state and core state"
+    invariants:
+      - "INV-200: the external platform is never the financial source of truth."
+      - "INV-201: platform state is reconciled against the core continuously, and divergence raises a break."
+    tests:
+      - "mapping correctness, bridge failover, divergence detection"

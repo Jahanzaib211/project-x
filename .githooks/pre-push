@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pre-push — run what CI will run, so CI rarely tells you something new.
+# =============================================================================
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+echo "pre-push: running the checks CI will run"
+fail=0
+step() {
+  printf '  %-42s' "$1"
+  shift
+  if "$@" >/tmp/projectx-prepush.log 2>&1; then
+    echo "ok"
+  else
+    echo "FAILED"
+    sed 's/^/      /' /tmp/projectx-prepush.log | tail -20
+    fail=1
+  fi
+}
+
+step "dependency DAG"            python3 scripts/check_dag.py
+step "gate rule"                 python3 scripts/check_gates.py
+step "docs in sync with registry" python3 scripts/gen_docs.py --check
+step "regression ratchet"        python3 scripts/check_regressions.py
+step "invariant coverage"        python3 scripts/check_invariant_coverage.py
+step "banned patterns"           ./scripts/banned_patterns.sh
+if command -v cargo >/dev/null 2>&1; then
+  step "G0 format"               cargo fmt --all -- --check
+  step "G1 clippy"               cargo clippy --workspace --all-targets -- -D warnings
+  step "G2 unit tests"           cargo test --workspace --lib
+  step "G4 invariants"           cargo test -p invariants
+fi
+
+echo
+if [ "$fail" -ne 0 ]; then
+  echo "push blocked — these same checks would fail in CI."
+  exit 1
+fi
+echo "all local gates green."

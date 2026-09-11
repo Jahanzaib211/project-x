@@ -1,0 +1,16 @@
+[package]
+name = "position-core"
+description = "05-position — netting, average price and realised P&L, as a fold over the journal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dependencies mirror this module's `depends_on` in registry/modules.yaml.
+# The graph is enforced by the compiler as well as by scripts/check_dag.py.
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+event-kernel = { path = "../event-kernel" }
+
+[lints]
+workspace = true

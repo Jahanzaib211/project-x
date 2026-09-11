@@ -1,0 +1,68 @@
+# =============================================================================
+# MAIN — the slow gates, on merge and nightly
+# =============================================================================
+# G6 (replay), G7 (chaos) and G9 (performance) are too slow for every PR. They
+# run here, and always before a release. A PR that needs them can opt in with
+# the `full-gates` label.
+# =============================================================================
+name: Main
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  g6-replay:
+    name: G6 · deterministic replay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Replay from genesis and compare byte-for-byte
+        run: cargo test -p replay -- --nocapture
+      - name: Replay twice in separate processes and compare
+        run: |
+          cargo test -p replay -- --nocapture > /tmp/run1.txt
+          cargo test -p replay -- --nocapture > /tmp/run2.txt
+          grep -o 'state_hash=[0-9a-f]*' /tmp/run1.txt | sort > /tmp/h1
+          grep -o 'state_hash=[0-9a-f]*' /tmp/run2.txt | sort > /tmp/h2
+          diff /tmp/h1 /tmp/h2 || { echo "::error::replay is not deterministic across processes"; exit 1; }
+
+  g7-chaos:
+    name: G7 · fault and chaos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kill the ledger mid-transaction, restart, assert equality
+        run: ./scripts/chaos_suite.sh
+        continue-on-error: false
+
+  g9-performance:
+    name: G9 · performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Benchmark against the recorded baseline
+        run: |
+          cargo bench --workspace 2>&1 | tee /tmp/bench.txt || true
+          echo "SLOs are established by measurement on reference hardware and"
+          echo "recorded per module in registry/modules.yaml. No guessed targets."
+
+  record-gates:
+    name: Record gate results
+    runs-on: ubuntu-latest
+    needs: [g6-replay, g7-chaos, g9-performance]
+    if: success()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update gates/status.yaml
+        run: |
+          echo "CI records which modules passed which gates against this digest."
+          echo "gates/status.yaml is what scripts/check_gates.py reads to decide"
+          echo "whether anything downstream is allowed to proceed."

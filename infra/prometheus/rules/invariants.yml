@@ -1,0 +1,87 @@
+# =============================================================================
+# INVARIANT MONITORS
+# =============================================================================
+# The same financial laws that gate the build at G4, evaluated continuously
+# against the running system.
+#
+# An invariant violation is not a warning to triage in the morning. It means
+# money is wrong RIGHT NOW. Severity is `page`, and the documented response is
+# to halt the affected path first and investigate second.
+# =============================================================================
+groups:
+  - name: financial-invariants
+    interval: 15s
+    rules:
+      - alert: LedgerImbalance
+        # INV-020 / INV-021: sum(debits) == sum(credits), per transaction and currency.
+        expr: projectx_ledger_imbalanced_transactions > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-020" }
+        annotations:
+          summary: "Ledger is unbalanced — money is wrong right now"
+          description: "{{ $value }} unbalanced transaction(s). Halt the affected posting path, then investigate."
+          runbook: "docs/runbooks/financial-discrepancy.md"
+
+      - alert: BalanceProjectionDrift
+        # INV-023: balance(account) == fold(journal entries).
+        expr: projectx_ledger_projection_drift_total > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-023" }
+        annotations:
+          summary: "A balance projection disagrees with the journal"
+          runbook: "docs/runbooks/financial-discrepancy.md"
+
+      - alert: PositionQuantityNotConserved
+        # INV-040: sum(fills) == position delta.
+        expr: projectx_position_conservation_violations_total > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-040" }
+        annotations:
+          summary: "Position quantity is not conserved — freeze the affected account"
+          runbook: "docs/runbooks/financial-discrepancy.md"
+
+      - alert: DuplicateFinancialEffect
+        # INV-100 / INV-102: exactly-once financial effect.
+        expr: increase(projectx_duplicate_financial_effect_total[5m]) > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-100" }
+        annotations:
+          summary: "A financial effect was applied more than once"
+          runbook: "docs/runbooks/financial-discrepancy.md"
+
+      - alert: ReplayDivergence
+        # INV-014 / INV-104: fold(log) == live state.
+        expr: projectx_replay_divergence_total > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-014" }
+        annotations:
+          summary: "Replaying the event log does not reproduce live state"
+          description: "Blocks the next release. The log is the truth; live state has diverged from it."
+
+      - alert: UnexplainedReconciliationBreak
+        # INV-140 / INV-141.
+        expr: projectx_reconciliation_breaks{status="unexplained"} > 0
+        for: 5m
+        labels: { severity: page, tier: T2, invariant: "INV-141" }
+        annotations:
+          summary: "Unexplained financial discrepancy — blocks release"
+          runbook: "docs/runbooks/financial-discrepancy.md"
+
+  - name: fail-closed
+    interval: 15s
+    rules:
+      - alert: RiskEngineFailingOpen
+        # INV-083: risk must reject when degraded, never allow.
+        expr: increase(projectx_risk_fail_open_total[5m]) > 0
+        for: 0s
+        labels: { severity: page, tier: T0, invariant: "INV-083" }
+        annotations:
+          summary: "Risk engine allowed an order while degraded — it must fail closed"
+
+      - alert: StaleQuoteServedAsLive
+        # INV-062.
+        expr: increase(projectx_stale_quote_served_total[5m]) > 0
+        for: 0s
+        labels: { severity: page, tier: T1, invariant: "INV-062" }
+        annotations:
+          summary: "A quote derived from stale market state was served as live"

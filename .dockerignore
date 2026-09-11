@@ -1,0 +1,12 @@
+.git
+.github
+target
+node_modules
+dist
+.next
+docs
+tests/replay/fixtures
+*.md
+.env
+.env.*
+!.env.example

@@ -1,0 +1,20 @@
+{
+  "name": "@projectx/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "20-web \u2014 presentation only. Owns no financial truth.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.2"
+  }
+}

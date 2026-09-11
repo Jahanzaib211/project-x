@@ -1,0 +1,13 @@
+[package]
+name = "event-kernel"
+description = "02-event-kernel — event envelope, identity, ordering, canonical serialization."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+
+[lints]
+workspace = true

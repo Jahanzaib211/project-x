@@ -1,0 +1,20 @@
+{
+  "name": "@projectx/ops",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project X Ops — the operator console. Separate app, separate port, separate deploy.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.20.1"
+  }
+}

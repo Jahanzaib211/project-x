@@ -1,0 +1,19 @@
+[package]
+name = "pnl-margin"
+description = "08-pnl-margin — equity, used margin, free margin and margin level."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dependencies mirror this module's `depends_on` in registry/modules.yaml.
+# The graph is enforced by the compiler as well as by scripts/check_dag.py.
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+# Test fixtures build a Position, which carries the event id that produced it.
+event-kernel = { path = "../event-kernel" }
+position-core = { path = "../position-core" }
+market-core = { path = "../market-core" }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "risk-core"
+description = "09-risk — pre-trade checks. Fails closed."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dependencies mirror this module's `depends_on` in registry/modules.yaml.
+# The graph is enforced by the compiler as well as by scripts/check_dag.py.
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+position-core = { path = "../position-core" }
+pnl-margin = { path = "../pnl-margin" }
+market-core = { path = "../market-core" }
+
+[lints]
+workspace = true

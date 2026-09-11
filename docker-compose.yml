@@ -1,0 +1,564 @@
+# =============================================================================
+# PROJECT X — full stack, local
+# =============================================================================
+# Profiles let you run only what you need:
+#   infra  postgres, redpanda, redis, clickhouse, minio
+#   core   ledger, market-data, pricing, oms          (Rust, Tier 0/1)
+#   edge   client-api                                  (TypeScript, Tier 4)
+#   web    Next.js terminal                            (Tier 4)
+#   obs    otel-collector, prometheus, grafana, jaeger
+#
+#   make up          everything except obs
+#   make up-core     infra + core
+#   docker compose --profile infra --profile obs up -d
+#
+# ISOLATION NOTES
+#   - every host port comes from .env and binds to ${HOST_BIND} (127.0.0.1)
+#   - ports live in a reserved block verified free on this machine: `make ports`
+#   - the network and every volume are prefixed `projectx_` so nothing here can
+#     collide with, adopt, or disturb another stack on this machine
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-projectx}
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-core-env: &core-env
+  RUST_LOG: ${RUST_LOG:-info}
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
+  KAFKA_BROKERS: ${KAFKA_BROKERS}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+  OTEL_SERVICE_NAMESPACE: ${OTEL_SERVICE_NAMESPACE:-projectx}
+  BASE_CURRENCY: ${BASE_CURRENCY:-USD}
+  MAX_QUOTE_STALENESS_MS: ${MAX_QUOTE_STALENESS_MS:-500}
+  RISK_FAIL_MODE: ${RISK_FAIL_MODE:-closed}
+
+networks:
+  projectx:
+    name: projectx_net
+    driver: bridge
+
+volumes:
+  postgres_data:   { name: projectx_postgres_data }
+  ledger_data:     { name: projectx_ledger_data }
+  redpanda_data:   { name: projectx_redpanda_data }
+  redis_data:      { name: projectx_redis_data }
+  clickhouse_data: { name: projectx_clickhouse_data }
+  minio_data:      { name: projectx_minio_data }
+  prometheus_data: { name: projectx_prometheus_data }
+  grafana_data:    { name: projectx_grafana_data }
+
+services:
+
+  # ===========================================================================
+  # INFRASTRUCTURE
+  # ===========================================================================
+
+  # The source of truth. Event store + double-entry ledger. Nothing else in this
+  # file is authoritative; everything else can be rebuilt from here.
+  postgres:
+    image: postgres:17-alpine
+    container_name: projectx-postgres
+    profiles: [infra, core, edge, web, all]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Deterministic collation: ordering must not vary with locale.
+      POSTGRES_INITDB_ARGS: "--data-checksums --locale=C --encoding=UTF8"
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - max_connections=200
+      - -c
+      - log_min_duration_statement=250ms
+      # Durability is not negotiable for a ledger.
+      - -c
+      - fsync=on
+      - -c
+      - synchronous_commit=on
+      - -c
+      - full_page_writes=on
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_POSTGRES:-27007}:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # Event bus. Ordered per aggregate partition. Rebuildable from the event store.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.8
+    container_name: projectx-redpanda
+    profiles: [infra, core, edge, web, all]
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+      - --advertise-kafka-addr=INTERNAL://redpanda:9092,EXTERNAL://${HOST_BIND:-127.0.0.1}:${PORT_KAFKA:-27018}
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_KAFKA:-27018}:19092"]
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks: [projectx]
+    <<: *logging
+
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    container_name: projectx-redpanda-console
+    profiles: [infra, all]
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_REDPANDA_CONSOLE:-27006}:8080"]
+    depends_on:
+      redpanda: { condition: service_healthy }
+    networks: [projectx]
+    <<: *logging
+
+  # Hot projections only. Losing this is an availability incident, never data loss.
+  # Mail sink. Accepts SMTP and holds everything, exposing an HTTP API to read
+  # it back — so "the reset link was delivered" is a claim the end-to-end suite
+  # can check rather than take on trust. Nothing here ever reaches a real
+  # mailbox, which is the point: a development stack that can send real mail to
+  # a real address is a development stack that eventually does.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: projectx-mailpit
+    profiles: [infra, edge, web, all]
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+      MP_MAX_MESSAGES: "500"
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT_MAILPIT_SMTP:-27019}:1025"
+      - "${HOST_BIND:-127.0.0.1}:${PORT_MAILPIT_UI:-27020}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [projectx]
+
+  redis:
+    image: redis:7-alpine
+    container_name: projectx-redis
+    profiles: [infra, core, edge, web, all]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_REDIS:-27008}:6379"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [projectx]
+    <<: *logging
+
+  # Analytics and reporting, deliberately off the transactional path.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: projectx-clickhouse
+    profiles: [infra, all]
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT_CLICKHOUSE_HTTP:-27009}:8123"
+      - "${HOST_BIND:-127.0.0.1}:${PORT_CLICKHOUSE_NATIVE:-27010}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    networks: [projectx]
+    <<: *logging
+
+  # Documents, statements, artifacts, and the recorded fixtures G6 replays.
+  minio:
+    image: minio/minio:RELEASE.2024-09-22T00-33-43Z
+    container_name: projectx-minio
+    profiles: [infra, all]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT_MINIO_API:-27011}:9000"
+      - "${HOST_BIND:-127.0.0.1}:${PORT_MINIO_CONSOLE:-27012}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    networks: [projectx]
+    <<: *logging
+
+  # ===========================================================================
+  # TIER 0 / TIER 1 — FINANCIAL CORE (Rust)
+  # ===========================================================================
+
+  # 03-ledger — double-entry, append-only. The financial source of truth.
+  ledger:
+    build:
+      context: .
+      dockerfile: services/ledger/Dockerfile
+    image: projectx/ledger:dev
+    container_name: projectx-ledger
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      <<: *core-env
+      SERVICE_NAME: ledger
+      MODULE_ID: 03-ledger
+      SERVICE_TIER: T0
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_LEDGER:-27002}:8000"]
+    # The journal is the financial source of truth and is append-only. Held in
+    # the container's writable layer it would be destroyed by `compose up
+    # --force-recreate` — every balance in the system is a fold over this file.
+    volumes:
+      - ledger_data:/var/lib/projectx
+    depends_on:
+      postgres: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # 06-market-data — feeds normalized into one validated canonical market state.
+  market-data:
+    build:
+      context: .
+      dockerfile: services/market-data/Dockerfile
+    image: projectx/market-data:dev
+    container_name: projectx-market-data
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      <<: *core-env
+      SERVICE_NAME: market-data
+      MODULE_ID: 06-market-data
+      SERVICE_TIER: T1
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_MARKET_DATA:-27003}:8000"]
+    depends_on:
+      redpanda: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # 07-pricing — pure function: (MarketState, config) -> ClientQuote.
+  pricing:
+    build:
+      context: .
+      dockerfile: services/pricing/Dockerfile
+    image: projectx/pricing:dev
+    container_name: projectx-pricing
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      <<: *core-env
+      SERVICE_NAME: pricing
+      MODULE_ID: 07-pricing
+      SERVICE_TIER: T1
+      MARKET_DATA_URL: ${MARKET_DATA_URL}
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_PRICING:-27004}:8000"]
+    depends_on:
+      market-data: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # 10-oms — order state machine. Hosts risk (09) and execution (11) as libraries
+  # until there is a measured reason to split a financial transaction over a network.
+  oms:
+    build:
+      context: .
+      dockerfile: services/oms/Dockerfile
+    image: projectx/oms:dev
+    container_name: projectx-oms
+    profiles: [core, all]
+    restart: unless-stopped
+    environment:
+      <<: *core-env
+      SERVICE_NAME: oms
+      MODULE_ID: 10-oms
+      SERVICE_TIER: T0
+      LEDGER_URL: ${LEDGER_URL}
+      PRICING_URL: ${PRICING_URL}
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_OMS:-27005}:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      ledger: { condition: service_healthy }
+      pricing: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [projectx]
+    <<: *logging
+
+  # ===========================================================================
+  # TIER 4 — EXPERIENCE
+  # ===========================================================================
+
+  # 19-client-api — REST/WS edge. Owns no financial truth; forwards what the
+  # core computed.
+  client-api:
+    build:
+      context: ./services/client-api
+      dockerfile: Dockerfile
+    image: projectx/client-api:dev
+    container_name: projectx-client-api
+    profiles: [edge, all]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 8000
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      LEDGER_URL: ${LEDGER_URL}
+      OMS_URL: ${OMS_URL}
+      PRICING_URL: ${PRICING_URL}
+      MARKET_DATA_URL: ${MARKET_DATA_URL}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      # Identity. The two role passwords are what the least-privilege database
+      # roles are created with; the service refuses to start in production while
+      # they are still the development defaults.
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:-dev_only_app_role}
+      DB_AUTH_PASSWORD: ${DB_AUTH_PASSWORD:-dev_only_auth_role}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      TRUST_CLIENT_ID_HEADER: ${TRUST_CLIENT_ID_HEADER:-true}
+      EXPOSE_OUTBOX: ${EXPOSE_OUTBOX:-true}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:27000}
+      # Delivery. `none` queues and sends nothing, which is the honest default
+      # for a platform with no provider; `smtp` drains the outbox for real.
+      MAIL_DRIVER: ${MAIL_DRIVER:-none}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@projectx.local}
+      SMTP_URL: ${SMTP_URL:-smtp://mailpit:1025}
+      # The shared secret the operator console presents. Unset disables the
+      # /v1/admin surface entirely rather than leaving it open.
+      OPS_TOKEN: ${OPS_TOKEN:-}
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_CLIENT_API:-27001}:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+      ledger: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [projectx]
+    <<: *logging
+
+  # Project X Ops — the operator console. Deliberately a separate service on a
+  # separate port: it can read every client's rows and end anybody's session, so
+  # it is exposed, secured and audited apart from the product.
+  #
+  # It mounts the repository read-only because two of its panels read what is
+  # actually on disk — the module registry and the gate definitions — and the
+  # docker socket because another reports what is actually running. Both are the
+  # console's whole purpose; both are also why it must never be public.
+  ops:
+    build:
+      context: .
+      dockerfile: apps/ops/Dockerfile
+    image: projectx/ops:dev
+    container_name: projectx-ops
+    profiles: [ops, all]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${ENVIRONMENT:-development}
+      PORT: 3000
+      API_INTERNAL_URL: ${CLIENT_API_URL:-http://client-api:8000}
+      OPS_TOKEN: ${OPS_TOKEN:-}
+      OPS_PASSCODE: ${OPS_PASSCODE:-}
+      OPS_SESSION_SECRET: ${OPS_SESSION_SECRET:-}
+      OPS_ALLOW_GATE_STACK: ${OPS_ALLOW_GATE_STACK:-false}
+      REPO_ROOT: /repo
+      # The repository is mounted from the host and owned by a different uid,
+      # which git refuses to read as "dubious ownership". Declared through the
+      # environment rather than a config file so nothing has to be written into
+      # a read-only mount.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /repo
+    volumes:
+      - .:/repo:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # The socket is root:docker on the host, and this container runs as an
+    # unprivileged user. Joining that group is what lets it read the daemon —
+    # and reading the daemon is equivalent to root on the host, which is the
+    # single strongest reason this console must never be exposed publicly.
+    group_add:
+      - "${DOCKER_GID:-973}"
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_OPS:-27030}:3000"]
+    depends_on:
+      client-api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [projectx]
+    <<: *logging
+
+  # 20-web — presentation only. Never owns financial truth.
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    image: projectx/web:dev
+    container_name: projectx-web
+    profiles: [web, all]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Server-side rendering reaches the API by service name over the compose
+      # network; the browser cannot resolve that, so it gets the published host
+      # address. Two URLs, on purpose.
+      API_INTERNAL_URL: ${CLIENT_API_URL:-http://client-api:8000}
+      NEXT_PUBLIC_API_URL: http://${HOST_BIND:-127.0.0.1}:${PORT_CLIENT_API:-27001}
+      # The web app needs this as well as the API: it is what sends a signed-out
+      # visitor to /login rather than letting them browse as the shared
+      # development identity. The API enforcing it alone would leave every page
+      # rendering somebody else's account list with the figures blanked out.
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_WEB:-27000}:3000"]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [projectx]
+    <<: *logging
+
+  # ===========================================================================
+  # OBSERVABILITY
+  # ===========================================================================
+  # An invariant violation is a page, not a log line. These exist so that the
+  # same assertions gating the build can watch the running system.
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    container_name: projectx-otel-collector
+    profiles: [obs, all]
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/otel/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT_OTLP_GRPC:-27016}:4317"
+      - "${HOST_BIND:-127.0.0.1}:${PORT_OTLP_HTTP:-27017}:4318"
+    networks: [projectx]
+    <<: *logging
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: projectx-prometheus
+    profiles: [obs, all]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_PROMETHEUS:-27013}:9090"]
+    networks: [projectx]
+    <<: *logging
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: projectx-grafana
+    profiles: [obs, all]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_GRAFANA:-27014}:3000"]
+    depends_on: [prometheus]
+    networks: [projectx]
+    <<: *logging
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: projectx-jaeger
+    profiles: [obs, all]
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["${HOST_BIND:-127.0.0.1}:${PORT_JAEGER:-27015}:16686"]
+    networks: [projectx]
+    <<: *logging

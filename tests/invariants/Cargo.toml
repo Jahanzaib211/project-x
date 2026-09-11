@@ -1,0 +1,14 @@
+[package]
+name = "invariants"
+description = "G4 — the financial laws of Project X, executed as tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+domain-kernel = { path = "../../crates/domain-kernel" }
+event-kernel = { path = "../../crates/event-kernel" }
+
+[lints]
+workspace = true

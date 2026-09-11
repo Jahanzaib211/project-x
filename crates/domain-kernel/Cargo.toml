@@ -1,0 +1,15 @@
+[package]
+name = "domain-kernel"
+description = "01-domain-kernel — Money, Price, Quantity. Fixed-point, currency-tagged, checked."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Deliberately zero dependencies.
+# This crate is the foundation every financial module rests on; its supply chain
+# should be nothing at all. It also means G2/G3/G4 run offline, in milliseconds.
+[dependencies]
+
+[lints]
+workspace = true

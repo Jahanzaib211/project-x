@@ -1,0 +1,17 @@
+[package]
+name = "account-core"
+description = "04-account — account lifecycle and the chart of accounts a client maps onto."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Dependencies mirror this module's `depends_on` in registry/modules.yaml.
+# The graph is enforced by the compiler as well as by scripts/check_dag.py.
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+event-kernel = { path = "../event-kernel" }
+ledger-core = { path = "../ledger-core" }
+
+[lints]
+workspace = true

@@ -1,0 +1,169 @@
+# =============================================================================
+# PROJECT X — QUALITY GATES
+# =============================================================================
+# A gate is a named, mechanically-checkable proof obligation. Modules declare
+# which gates they require in registry/modules.yaml. CI refuses to promote an
+# artifact past a gate the module declares but has not passed.
+#
+# G0-G9  are CI gates    (run on code)
+# G10-G12 are CD stages  (run on an environment)
+#
+# Rule: a module may not be merged if any module it depends on has not passed
+# every gate that dependency declares. Enforced by scripts/check_gates.py.
+# =============================================================================
+
+version: 1
+
+gates:
+
+  G0:
+    name: "Compile and format"
+    stage: ci
+    blocking: true
+    question: "Does it build, and does it look like the rest of the tree?"
+    checks: ["compile all targets", "formatter is a no-op", "lockfiles committed and unchanged", "no generated file drift"]
+    typical_runtime: "< 2 min"
+
+  G1:
+    name: "Static correctness"
+    stage: ci
+    blocking: true
+    question: "Can a machine prove anything is wrong without running it?"
+    checks:
+      - "linters at deny-warnings"
+      - "type checking with no escape hatches in financial code"
+      - "SAST"
+      - "dependency vulnerability scan"
+      - "secret scan"
+      - "license policy"
+      - "banned-pattern scan (float in financial code, unwrap on money paths, direct balance mutation)"
+    typical_runtime: "< 5 min"
+
+  G2:
+    name: "Unit tests"
+    stage: ci
+    blocking: true
+    question: "Does each piece do what its author claimed?"
+    checks: ["unit test suite green", "coverage floor per module", "no ignored or skipped tests without a linked issue"]
+    typical_runtime: "< 5 min"
+
+  G3:
+    name: "Property-based tests"
+    stage: ci
+    blocking: true
+    question: "Does it hold for inputs nobody thought to write down?"
+    checks:
+      - "property suite green at the configured case count"
+      - "shrinking enabled and failures reproducible from a recorded seed"
+      - "every discovered counterexample committed as a regression test"
+    typical_runtime: "< 15 min"
+
+  G4:
+    name: "Domain invariants"
+    stage: ci
+    blocking: true
+    question: "Are the financial laws of this system still true?"
+    checks:
+      - "every INV-* the module declares is executed as a test"
+      - "invariant coverage: no declared invariant is unimplemented"
+      - "invariants asserted continuously during randomized scenario runs, not just at the end"
+    typical_runtime: "< 20 min"
+    notes: "This is the gate that distinguishes this pipeline from an ordinary one."
+
+  G5:
+    name: "Integration tests"
+    stage: ci
+    blocking: true
+    question: "Do the pieces still agree once they are wired together?"
+    checks: ["service-to-service suites against real dependencies in compose", "contract tests against every adapter and its simulator", "database migration up and down"]
+    typical_runtime: "< 30 min"
+
+  G6:
+    name: "Deterministic replay"
+    stage: ci
+    blocking: true
+    question: "Does replaying history reproduce the present, exactly?"
+    checks:
+      - "replay a recorded event log from genesis; assert byte-identical resulting state"
+      - "replay across process restarts and across machines"
+      - "snapshot + tail replay equals full replay"
+    typical_runtime: "< 30 min"
+
+  G7:
+    name: "Fault and chaos"
+    stage: ci
+    blocking: true
+    question: "What happens when the machine, the network or the database betrays you?"
+    checks:
+      - "process kill at randomized commit boundaries"
+      - "database failover and connection loss"
+      - "network partition, packet loss, latency injection"
+      - "clock skew and clock jump"
+      - "after every injected fault: invariants hold and replay equivalence holds"
+    typical_runtime: "< 60 min"
+
+  G8:
+    name: "Security"
+    stage: ci
+    blocking: true
+    question: "Can someone take money, data or availability that is not theirs?"
+    checks:
+      - "authn/authz test matrix"
+      - "input fuzzing on every external boundary"
+      - "dependency and container image scanning"
+      - "secret handling and key rotation tests"
+      - "audit log completeness and tamper evidence"
+    typical_runtime: "< 30 min"
+
+  G9:
+    name: "Performance"
+    stage: ci
+    blocking: true
+    question: "Is it fast enough, and did this change make it worse?"
+    checks:
+      - "benchmark suite against the module's SLO on reference hardware"
+      - "regression comparison against the last release baseline"
+      - "allocation and memory profile within budget"
+      - "sustained-load soak without degradation"
+    typical_runtime: "< 45 min"
+    notes: "SLO numbers are established by measurement on target hardware and recorded per module, never guessed."
+
+  G10:
+    name: "Staging"
+    stage: cd
+    blocking: true
+    question: "Does it behave in an environment shaped like production?"
+    checks:
+      - "deploy to staging"
+      - "synthetic order flow through the full path"
+      - "full historical replay against staging"
+      - "financial reconciliation clean across the staging window"
+      - "no error-budget burn during the soak"
+
+  G11:
+    name: "Canary"
+    stage: cd
+    blocking: true
+    question: "Does it behave with real traffic, on a slice small enough to survive?"
+    checks:
+      - "deploy to a limited slice"
+      - "compare financial outputs against the incumbent version on identical input (shadow diff)"
+      - "watch invariant monitors, error rate, latency, reconciliation breaks"
+      - "automatic rollback on any invariant violation"
+
+  G12:
+    name: "Production"
+    stage: cd
+    blocking: true
+    question: "Is a human accountable for this going out?"
+    checks:
+      - "all prior gates green on this exact artifact digest"
+      - "release approval recorded per the module's tier policy"
+      - "rollback plan verified and rehearsed"
+      - "post-deploy invariant and reconciliation watch"
+
+# Gates whose absence must never be waived, on any module, for any reason.
+non_waivable: [G0, G1, G2, G4]
+
+# Which module tiers require a human release approval regardless of automation.
+manual_approval_tiers: [T0, T1, T2, T3]

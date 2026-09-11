@@ -1,0 +1,41 @@
+# =============================================================================
+# CODEOWNERS
+# =============================================================================
+# Ownership follows tier. Tier 0 changes can be wrong in ways no test encodes,
+# so they require a named human who is accountable for them.
+#
+# Replace the placeholder teams with real ones before enabling branch protection.
+# =============================================================================
+
+# Default
+*                           @projectx/engineering
+
+# --- The graph and the gates themselves -------------------------------------
+# Changing what must be proven is a bigger decision than changing code.
+/registry/modules.yaml      @projectx/financial-core @projectx/risk
+/gates/                     @projectx/financial-core @projectx/risk
+/scripts/check_*.py         @projectx/financial-core
+/.github/workflows/         @projectx/platform @projectx/financial-core
+
+# --- Tier 0: the financial core ---------------------------------------------
+/crates/domain-kernel/      @projectx/financial-core
+/crates/event-kernel/       @projectx/financial-core
+/services/ledger/           @projectx/financial-core
+/services/oms/              @projectx/financial-core
+/tests/invariants/          @projectx/financial-core @projectx/risk
+/tests/replay/              @projectx/financial-core
+/infra/postgres/            @projectx/financial-core @projectx/platform
+
+# --- Tier 1: market infrastructure ------------------------------------------
+/services/market-data/      @projectx/market-infra
+/services/pricing/          @projectx/market-infra @projectx/risk
+
+# --- Tier 4: experience ------------------------------------------------------
+/services/client-api/       @projectx/product-eng
+/apps/web/                  @projectx/product-eng
+
+# --- Process and compliance --------------------------------------------------
+/SECURITY.md                @projectx/security
+/docs/10-security.md        @projectx/security
+/docs/adr/                  @projectx/financial-core @projectx/platform
+/CHANGELOG.md               @projectx/engineering

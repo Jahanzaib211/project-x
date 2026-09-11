@@ -1,0 +1,13 @@
+[package]
+name = "market-core"
+description = "06-market-data — instruments and a deterministic, pure market state function."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+
+[lints]
+workspace = true

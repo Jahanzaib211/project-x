@@ -1,0 +1,104 @@
+# =============================================================================
+# GATE RESULTS
+# =============================================================================
+# Which modules have passed which gates. Read by scripts/check_gates.py to
+# decide whether anything downstream is allowed to proceed.
+#
+# A module absent from this map has passed nothing.
+#
+# In steady state CI writes this file, keyed to an artifact digest. The entries
+# below were produced by the Phase 0 bootstrap run on a developer machine and
+# are recorded here so the gate mechanism has real data to enforce against. Each
+# one corresponds to a check that was actually executed and observed to pass —
+# nothing here is aspirational.
+#
+# Hand-editing this file outside the documented emergency procedure is a process
+# violation, and because it is in git, it is a visible one.
+# See docs/runbooks/emergency-change.md.
+# =============================================================================
+version: 1
+
+passed:
+  # G0 cargo fmt --check + cargo check   G1 clippy -D warnings + banned patterns
+  # G2 cargo test --workspace (240 passing)
+  # G4 INV-900..902 executed by scripts/check_foundation_invariants.sh:
+  # dependencies pinned, core crates dependency-free, no secret tracked, the
+  # secret scanner verified against a planted canary, runtime images non-root
+  # and free of a package manager.
+  00-foundation: [G0, G1, G2, G4]
+
+  # G3 property suite, ~100k generated cases. G4 INV-001..005 executed.
+  01-domain-kernel: [G0, G1, G2, G3, G4]
+
+  # G4 INV-010..014 executed. G6 replay suite: replay from genesis identical,
+  # snapshot+tail == full replay, duplicate delivery inert, time not content.
+  # G5 outstanding: the cross-service integration suite does not exist yet.
+  02-event-kernel: [G0, G1, G2, G3, G4, G6]
+
+  # ---------------------------------------------------------------------------
+  # The financial core, built in dependency order. Every entry below records
+  # only gates that were actually executed on this tree.
+  #
+  # G3 is claimed by NO module here. The suites exercise wide input ranges by
+  # exhaustive loop — thousands of ticks, every instrument, every markup — but
+  # that is not a property-based generator with shrinking, and calling it one
+  # would make the gate a label rather than a check.
+  #
+  # G7 (chaos), G8 (security) and G9 (performance) run in CI on reference
+  # hardware and are not claimed from a developer machine, with one exception
+  # noted against 03-ledger.
+  # ---------------------------------------------------------------------------
+
+  # G4 INV-020..024 executed by crates/ledger-core and services/ledger.
+  # G5 the end-to-end suite (tests/e2e) drives orders through this service from
+  # a browser, against pricing, market-data and the OMS.
+  # G6 replay: services/ledger/src/state.rs asserts that a core reopened from
+  # its append-only journal is identical to the one that crashed — balances,
+  # positions, average prices and the id counter — and that a torn final write
+  # is discarded rather than half-applied. Verified again by hand against the
+  # running service: kill -9, restart, balance identical (INV-024).
+  # Also verified earlier at the schema level by
+  # scripts/verify_ledger_constraints.sh (INV-010, 011, 012, 020, 021, 022).
+  03-ledger: [G0, G1, G2, G4, G5, G6]
+
+  # G4 INV-030..032 executed. G5 via the end-to-end account-opening flow.
+  04-account: [G0, G1, G2, G4, G5]
+
+  # G4 INV-040..043 executed, including reversal through zero and the
+  # equivalence of partial closes to one whole close.
+  # G6 positions are a fold over the same journal the ledger replays, and the
+  # recovery test asserts them alongside balances.
+  05-position: [G0, G1, G2, G4, G5, G6]
+
+  # G4 INV-050..052 executed. G6 the feed is a pure function of the tick index,
+  # so any past state recomputes exactly; asserted across every instrument.
+  06-market-data: [G0, G1, G2, G4, G5, G6]
+
+  # G4 INV-060..063 executed. G6 as above: same input, byte-identical quote.
+  07-pricing: [G0, G1, G2, G4, G5, G6]
+
+  # G4 INV-070..073 executed, including the zero-used-margin case that is a
+  # division fault in most implementations.
+  08-pnl-margin: [G0, G1, G2, G4, G5]
+
+  # G4 INV-080..083 executed. The fail-closed path is a function that is called
+  # and asserted on, not a comment.
+  09-risk: [G0, G1, G2, G4, G5]
+
+  # G4 INV-090..093 executed, including the full legal-transition matrix and
+  # the unreachable-core case that must resolve to UNKNOWN rather than to a
+  # guess.
+  10-oms: [G0, G1, G2, G4, G5]
+
+  # G4 INV-100..104 executed, including that realised P&L equals the ledger
+  # postings for the same close, and that a failed execution books nothing.
+  11-execution: [G0, G1, G2, G4, G5]
+
+  # G4 INV-180..184 executed by scripts/check_client_area_invariants.sh, both
+  # statically and against the running service.
+  # G5 tests/e2e — 22 browser tests through the whole stack.
+  19-client-api: [G0, G1, G2, G4, G5]
+
+  # G4 INV-190..191 executed by the rendered-output suite and the live checks.
+  # G5 as above, including a run with JavaScript disabled.
+  20-web: [G0, G1, G2, G4, G5]

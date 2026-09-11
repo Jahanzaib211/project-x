@@ -1,0 +1,18 @@
+[package]
+name = "service-kit"
+description = "Shared service scaffolding: HTTP, health, readiness, metrics, structured logs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+domain-kernel = { path = "../domain-kernel" }
+event-kernel = { path = "../event-kernel" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "healthcheck"
+path = "src/bin/healthcheck.rs"

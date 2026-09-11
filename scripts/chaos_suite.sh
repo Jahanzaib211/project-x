@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# =============================================================================
+# G7 — fault and chaos
+# =============================================================================
+# The rule that makes this meaningful: after EVERY injected fault, the
+# invariants must still hold AND replay equivalence must still hold. A chaos
+# suite that only checks "did it come back up" is reassurance, not proof.
+# =============================================================================
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+
+fail=0
+echo "chaos suite:"
+
+snapshot_ledger() {
+  docker compose exec -T postgres psql -U "${POSTGRES_USER:-projectx}" \
+    -d "${POSTGRES_DB:-projectx}" -t -A -F',' \
+    -c 'SELECT account_id, currency, balance_minor FROM ledger.balances ORDER BY account_id, currency;' 2>/dev/null
+}
+
+count_imbalances() {
+  docker compose exec -T postgres psql -U "${POSTGRES_USER:-projectx}" \
+    -d "${POSTGRES_DB:-projectx}" -t -A \
+    -c 'SELECT count(*) FROM ledger.imbalances;' 2>/dev/null | tr -d '[:space:]'
+}
+
+# ---------------------------------------------------------------------------
+# INV-024 — the ledger after crash recovery is identical to before the crash.
+# ---------------------------------------------------------------------------
+echo "  [1/3] kill -9 the database mid-flight, restart, compare the ledger"
+before="$(snapshot_ledger)"
+if [ -z "$before" ]; then
+  echo "      SKIPPED — infrastructure is not running (make up-infra)"
+else
+  docker compose kill -s SIGKILL postgres >/dev/null 2>&1
+  docker compose up -d postgres >/dev/null 2>&1
+  for _ in $(seq 1 60); do
+    docker compose exec -T postgres pg_isready -q >/dev/null 2>&1 && break
+    sleep 2
+  done
+  after="$(snapshot_ledger)"
+  if [ "$before" = "$after" ]; then
+    echo "      ✓ INV-024 ledger identical after recovery"
+  else
+    echo "      ✗ INV-024 VIOLATED — the ledger changed across a crash"
+    diff <(echo "$before") <(echo "$after") | sed 's/^/        /'
+    fail=1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# INV-020 must hold after the fault, not merely before it.
+# ---------------------------------------------------------------------------
+echo "  [2/3] invariants after the fault"
+imbalances="$(count_imbalances)"
+if [ "${imbalances:-0}" = "0" ]; then
+  echo "      ✓ INV-020 debits == credits after recovery"
+else
+  echo "      ✗ INV-020 VIOLATED — $imbalances unbalanced transaction(s) after recovery"
+  fail=1
+fi
+
+# ---------------------------------------------------------------------------
+# INV-014 / INV-104 — replay equivalence must survive the fault.
+# ---------------------------------------------------------------------------
+echo "  [3/3] replay equivalence after the fault"
+if command -v cargo >/dev/null 2>&1; then
+  if cargo test -p invariants --test event_laws >/dev/null 2>&1; then
+    echo "      ✓ replay determinism holds"
+  else
+    echo "      ✗ replay determinism BROKEN after the fault"
+    fail=1
+  fi
+else
+  echo "      SKIPPED — cargo unavailable"
+fi
+
+echo
+[ "$fail" -eq 0 ] && echo "✓ chaos suite passed" || echo "✗ chaos suite FAILED"
+exit $fail

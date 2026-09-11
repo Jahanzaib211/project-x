@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pre-commit — cheap checks only. Anything slow belongs in pre-push.
+# =============================================================================
+# Install with: make hooks
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+fail=0
+say() { printf '  %s\n' "$1"; }
+
+echo "pre-commit:"
+
+# 1. Docs must be regenerated whenever the registry changes. Catching this here
+#    means a stale-docs CI failure should never happen to anyone.
+if git diff --cached --name-only | grep -qE '^(registry/modules\.yaml|gates/gates\.yaml)$'; then
+  if ! python3 scripts/gen_docs.py --check >/dev/null 2>&1; then
+    python3 scripts/gen_docs.py >/dev/null 2>&1
+    git add docs/modules docs/03-dependency-dag.md docs/05-invariants.md README.md 2>/dev/null
+    say "✓ regenerated docs from the registry and staged them"
+  fi
+fi
+
+# 2. The graph must stay a DAG.
+if ! python3 scripts/check_dag.py >/dev/null 2>&1; then
+  say "✗ DAG check failed — run: python3 scripts/check_dag.py"
+  fail=1
+else
+  say "✓ dependency DAG valid"
+fi
+
+# 3. Nothing that was proven may be silently lost.
+if ! python3 scripts/check_regressions.py >/dev/null 2>&1; then
+  say "✗ regression check failed — run: python3 scripts/check_regressions.py"
+  say "  If the change is intended: make baseline"
+  fail=1
+else
+  say "✓ no regressions"
+fi
+
+# 4. The project's rules, mechanically.
+if ! ./scripts/banned_patterns.sh >/dev/null 2>&1; then
+  say "✗ banned patterns found — run: ./scripts/banned_patterns.sh"
+  fail=1
+else
+  say "✓ banned-pattern scan clean"
+fi
+
+# 5. Never commit a real .env.
+if git diff --cached --name-only | grep -qx '.env'; then
+  say "✗ refusing to commit .env — it holds credentials. Use .env.example."
+  fail=1
+fi
+
+# 6. Formatting.
+if command -v cargo >/dev/null 2>&1 && [ -f Cargo.toml ]; then
+  if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+    say "✗ rustfmt would change files — run: cargo fmt --all"
+    fail=1
+  else
+    say "✓ formatting clean"
+  fi
+fi
+
+[ "$fail" -eq 0 ] || { echo; echo "commit blocked. Fix the items above, or use --no-verify only if you know why."; }
+exit $fail

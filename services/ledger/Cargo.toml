@@ -1,0 +1,30 @@
+[package]
+name = "ledger"
+description = "03-ledger — Double-entry ledger — the financial source of truth."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ledger"
+path = "src/main.rs"
+
+# This process hosts the whole financial core. Risk and execution are libraries
+# inside it rather than services beside it, because a trade is one transaction:
+# value the account, check it, book it, post it. Splitting that across a network
+# boundary buys nothing and costs atomicity — see docs/01-principles.md.
+[dependencies]
+account-core = { path = "../../crates/account-core" }
+domain-kernel = { path = "../../crates/domain-kernel" }
+event-kernel = { path = "../../crates/event-kernel" }
+execution-core = { path = "../../crates/execution-core" }
+ledger-core = { path = "../../crates/ledger-core" }
+market-core = { path = "../../crates/market-core" }
+pnl-margin = { path = "../../crates/pnl-margin" }
+position-core = { path = "../../crates/position-core" }
+risk-core = { path = "../../crates/risk-core" }
+service-kit = { path = "../../crates/service-kit" }
+
+[lints]
+workspace = true

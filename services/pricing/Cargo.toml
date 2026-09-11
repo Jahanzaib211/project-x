@@ -1,0 +1,20 @@
+[package]
+name = "pricing"
+description = "07-pricing — Pure function: (MarketState, config) -> ClientQuote."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pricing"
+path = "src/main.rs"
+
+[dependencies]
+domain-kernel = { path = "../../crates/domain-kernel" }
+event-kernel = { path = "../../crates/event-kernel" }
+market-core = { path = "../../crates/market-core" }
+service-kit = { path = "../../crates/service-kit" }
+
+[lints]
+workspace = true

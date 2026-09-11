@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain-kernel",
+    "crates/event-kernel",
+    "crates/ledger-core",
+    "crates/account-core",
+    "crates/position-core",
+    "crates/market-core",
+    "crates/pnl-margin",
+    "crates/risk-core",
+    "crates/execution-core",
+    "crates/service-kit",
+    "tests/invariants",
+    "tests/replay",
+    "services/ledger",
+    "services/market-data",
+    "services/pricing",
+    "services/oms",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# P1 — floating point has no place in financial code.
+float_arithmetic = "deny"
+# Panics are not an error-handling strategy on a money path.
+unwrap_used = "deny"
+expect_used = "deny"
+# Silent overflow is how money goes missing.
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# Overflow checks stay ON in release. A wrong number is worse than a slow one.
+overflow-checks = true
+
+[profile.test]
+overflow-checks = true
