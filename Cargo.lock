@@ -36,12 +36,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "integration"
+version = "0.1.0"
+dependencies = [
+ "market-core",
+ "service-kit",
+]
+
+[[package]]
 name = "invariants"
 version = "0.1.0"
 dependencies = [
+ "account-core",
  "domain-kernel",
  "event-kernel",
+ "ledger",
+ "ledger-core",
  "market-core",
+ "oms",
+ "pnl-margin",
+ "pricing",
+ "risk-core",
 ]
 
 [[package]]
@@ -127,9 +142,13 @@ dependencies = [
 name = "replay"
 version = "0.1.0"
 dependencies = [
+ "account-core",
  "domain-kernel",
  "event-kernel",
  "invariants",
+ "ledger",
+ "market-core",
+ "oms",
 ]
 
 [[package]]

@@ -20,11 +20,11 @@ version: 1
 
 passed:
   # G0 cargo fmt --check + cargo check   G1 clippy -D warnings + banned patterns
-  # G2 cargo test --workspace (240 passing)
+  # G2 cargo test --workspace and the node:test suites of every JS package
   # G4 INV-900..902 executed by scripts/check_foundation_invariants.sh:
   # dependencies pinned, core crates dependency-free, no secret tracked, the
   # secret scanner verified against a planted canary, runtime images non-root
-  # and free of a package manager.
+  # and free of a package manager (feed-gateway and mt5-sim included).
   00-foundation: [G0, G1, G2, G4]
 
   # G3 property suite, ~100k generated cases. G4 INV-001..005 executed.
@@ -32,109 +32,100 @@ passed:
 
   # G4 INV-010..014 executed. G6 replay suite: replay from genesis identical,
   # snapshot+tail == full replay, duplicate delivery inert, time not content.
-  # G5 outstanding: the cross-service integration suite does not exist yet.
-  02-event-kernel: [G0, G1, G2, G3, G4, G6]
+  # G5 tests/integration/tests/live_stack.rs against the composed stack: the
+  # journal the ledger serves is unique, strictly increasing and stable under
+  # a second read; the trial balance it serves sums to zero per currency.
+  02-event-kernel: [G0, G1, G2, G3, G4, G5, G6]
 
   # ---------------------------------------------------------------------------
   # The financial core, built in dependency order. Every entry below records
   # only gates that were actually executed on this tree.
   #
-  # G3 is claimed by NO module here. The suites exercise wide input ranges by
-  # exhaustive loop — thousands of ticks, every instrument, every markup — but
-  # that is not a property-based generator with shrinking, and calling it one
-  # would make the gate a label rather than a check.
-  #
-  # G7 (chaos), G8 (security) and G9 (performance) run in CI on reference
-  # hardware and are not claimed from a developer machine, with one exception
-  # noted against 03-ledger.
+  # G3 is the seeded property harness in tests/invariants — money_laws,
+  # event_laws, feed_laws, core_laws, oms_laws, pricing_laws — thousands of
+  # generated cases per law, laws asserted after every step, failures
+  # reproducible from the printed seed. Not a shrinking framework; a generator
+  # with a seed, which is what the gate asks for.
+  # G6 is tests/replay: the real core written to a journal, reopened and
+  # compared field for field, twice in separate processes by CI.
+  # G7 is scripts/chaos_suite.sh against the composed stack: the database,
+  # market-data, the ledger (under a burst of orders) and the OMS killed with
+  # SIGKILL and restarted; pricing killed and observed failing closed.
+  # G8 is scripts/check_security.sh, including the core services' own
+  # surfaces probed with malformed, oversized and out-of-bounds input.
+  # G9 is scripts/check_performance.sh: the read paths and the order path.
   # ---------------------------------------------------------------------------
 
-  # G4 INV-020..024 executed by crates/ledger-core and services/ledger.
-  # G5 the end-to-end suite (tests/e2e) drives orders through this service from
-  # a browser, against pricing, market-data and the OMS.
-  # G6 replay: services/ledger/src/state.rs asserts that a core reopened from
-  # its append-only journal is identical to the one that crashed — balances,
-  # positions, average prices and the id counter — and that a torn final write
-  # is discarded rather than half-applied. Verified again by hand against the
-  # running service: kill -9, restart, balance identical (INV-024).
-  # Also verified earlier at the schema level by
-  # scripts/verify_ledger_constraints.sh (INV-010, 011, 012, 020, 021, 022).
-  # G7 scripts/chaos_suite.sh: kill -9 the database mid-flight, INV-024 and
-  # INV-020 re-asserted after recovery, replay equivalence re-run.
-  # G8 scripts/check_security.sh against the running service: authorization
-  # matrix, credential fuzzing, image scan of the ledger image.
-  03-ledger: [G0, G1, G2, G4, G5, G6, G7, G8]
+  # G4 INV-020..024 executed. G5 tests/e2e drives orders through this service
+  # from a browser. G6 core_replay: accounts of both modes, credits, status
+  # changes, fills, refusals and every id come back from the journal; a
+  # retried key after a restart is the same order. G7 killed mid-order: every
+  # acknowledged fill survived, the book balanced, in-flight keys retried to
+  # exactly one order each. G8 surfaces probed, image scanned.
+  03-ledger: [G0, G1, G2, G3, G4, G5, G6, G7, G8]
 
-  # G4 INV-030..035 executed: the lifecycle switch, demo credits bounded and
-  # idempotent, resets only while flat, and INV-033 by the ledger opening
-  # both modes through one door. G5 via tests/e2e accounts.spec.js — an
-  # account opened from either tab is found where it was opened, funded or
-  # honestly unfunded, and a demo deposit settles in the ledger.
-  # G6 account records, status changes and credits replay from the journal
-  # (state.rs: inv_024_modes_statuses_and_credits_survive_a_restart).
-  04-account: [G0, G1, G2, G4, G5, G6]
+  # G4 INV-030..035 executed. G3 core_laws: free margin, the lifecycle
+  # switch and demo credits under generated histories. G5 tests/e2e
+  # accounts.spec.js. G6 account records, statuses and credits replay.
+  04-account: [G0, G1, G2, G3, G4, G5, G6]
 
-  # G4 INV-040..043 executed, including reversal through zero and the
-  # equivalence of partial closes to one whole close.
-  # G6 positions are a fold over the same journal the ledger replays, and the
-  # recovery test asserts them alongside balances.
-  05-position: [G0, G1, G2, G4, G5, G6]
+  # G4 INV-040..043 executed. G3 core_laws: the book is the net of its fills
+  # after any history and closes to flat (which found and fixed a residual
+  # below the venue minimum that could never be closed). G6 positions are
+  # folded from the same journal the ledger replays. G7 the ledger kill
+  # compares the position to the acknowledged fills.
+  05-position: [G0, G1, G2, G3, G4, G5, G6, G7]
 
-  # G3 tests/invariants/tests/feed_laws.rs: seeded generators over thousands
-  # of quote streams — crossed, negative, absurd, reordered, duplicated —
-  # with a reproducible seed on failure.
-  # G4 INV-050..054 executed: validation at the door and the spike filter,
-  # staleness carried on every recorded quote, the session calendar freezing
-  # a closed market, and the recorded store rebuilt from its log digest for
-  # digest. G6 the synthetic series is a pure function of the tick and the
-  # recorded feed replays from feed.log (state.rs: inv_054_the_state_replays_
-  # from_its_log_identically). G7 scripts/chaos_suite.sh kills market-data
-  # mid-ingest and asserts the record replays and quotes serve. G9
-  # scripts/check_performance.sh measures /v1/quotes, /v1/feed/status and
-  # /v1/sessions against a recorded baseline.
+  # G3 feed_laws. G4 INV-050..054 executed. G6 the recorded feed replays
+  # from feed.log digest for digest. G7 killed mid-ingest. G9 read paths.
   06-market-data: [G0, G1, G2, G3, G4, G5, G6, G7, G9]
 
-  # G4 INV-060..063 executed against a venue quote fetched from market-data;
-  # a frozen quote is served with its session rather than refused as stale.
-  # G6 same venue quote, byte-identical client quote. G9 as above (/v1/quote).
-  07-pricing: [G0, G1, G2, G4, G5, G6, G9]
+  # G3 pricing_laws over generated venue quotes and markups (which found and
+  # fixed a client quote that could sit inside a wide venue quote). G4
+  # INV-060..063 executed. G6 same venue quote, byte-identical client quote.
+  # G7 killed: no price served while down, serving again after. G8 its
+  # surface probed, its image scanned. G9 /v1/quote measured.
+  07-pricing: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-070..073 executed, including the zero-used-margin case that is a
-  # division fault in most implementations.
-  08-pnl-margin: [G0, G1, G2, G4, G5]
+  # G4 INV-070..073 executed. G3 core_laws: equity = balance + unrealised,
+  # free = equity - used, a margin level iff something is open, after every
+  # generated step. G6 valued identically from a replayed journal. G7 the
+  # ledger kill (this module runs inside it). G8 as the ledger. G9 the
+  # valuation and order paths.
+  08-pnl-margin: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-080..084 executed. The fail-closed path is a function that is called
-  # and asserted on, not a comment; a closed session is refused before price
-  # or margin is looked at, and proven live on a weekend in tests/e2e.
-  09-risk: [G0, G1, G2, G4, G5]
+  # G4 INV-080..084 executed. G3 core_laws: determinism of the whole decision
+  # fold from one seed, closed sessions and frozen accounts refused under
+  # every generated intent. G6/G7/G8/G9 as the ledger, which hosts it.
+  09-risk: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-090..093 executed, including the full legal-transition matrix and
-  # the unreachable-core case that must resolve to UNKNOWN rather than to a
-  # guess.
-  10-oms: [G0, G1, G2, G4, G5]
+  # G4 INV-090..093 executed. G3 oms_laws: random transition walks — only
+  # declared edges, one terminal state, UNKNOWN only from EXECUTING and only
+  # resolved by a known outcome (which is now asked of the ledger on retry,
+  # never assumed). G6 the lifecycle replays from a recorded walk. G7 killed
+  # mid-order, retried key resolved to a terminal state. G8 surface probed.
+  # G9 the order path.
+  10-oms: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-100..104 executed, including that realised P&L equals the ledger
-  # postings for the same close, and that a failed execution books nothing.
-  11-execution: [G0, G1, G2, G4, G5]
+  # G4 INV-100..104 executed. G3 core_laws: every deal posts exactly one
+  # transaction found in the journal under its own id, after every step.
+  # G6/G7/G8/G9 as the ledger, which hosts it.
+  11-execution: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G3 tests/invariants/tests/feed_laws.rs generates the quote streams the
-  # gateway is measured against; G4 INV-120..122 executed: the mapping table
-  # and the adapter contract (parsers for every provider dialect, the
-  # simulator with injected faults), the circuit breaker and per-symbol
-  # failover, exactly-once at the store. G5 the contract suite runs against
-  # every parser and the simulator, and tests/e2e prices the whole stack on
-  # the simulated bridge through the gateway. G6 the record replays. G7 the
-  # gateway rides out market-data being killed mid-push (chaos suite). G8
-  # the feed-gateway image is scanned and its surface is health, metrics and
-  # a status view. G9 the feed's read paths are measured.
+  # G3 feed_laws; G4 INV-120..122 executed: the mapping table and the
+  # adapter contract, the circuit breaker and per-symbol failover,
+  # exactly-once at the store. G5 the contract suite against every parser and
+  # the simulator, and tests/e2e priced on the simulated bridge through the
+  # gateway. G6 the record replays. G7 the gateway rides out market-data
+  # being killed mid-push. G8 image scanned. G9 read paths measured.
   13-lp-connectivity: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-180..192 executed by scripts/check_client_area_invariants.sh, both
-  # statically and against the running service, signed in as the gate's own
-  # identity. G5 tests/e2e — 55 browser tests through the whole stack.
-  # G8 scripts/check_security.sh: authorization matrix, session and reset
-  # hardening, fuzzing, image scan. G9 scripts/check_performance.sh.
-  19-client-api: [G0, G1, G2, G4, G5, G8, G9]
+  # G3 money.test.js: the money boundary over generated decimals and their
+  # manglings (which found and refused signed amounts). G4 INV-180..192
+  # executed by scripts/check_client_area_invariants.sh, signed in as the
+  # gate's own identity. G5 tests/e2e — 55 browser tests through the whole
+  # stack. G8 scripts/check_security.sh. G9 scripts/check_performance.sh.
+  19-client-api: [G0, G1, G2, G3, G4, G5, G8, G9]
 
   # G4 INV-190..192 executed by the rendered-output suite and the live checks.
   # G5 as above, including a run with JavaScript disabled and the chart suite

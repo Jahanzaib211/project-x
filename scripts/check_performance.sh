@@ -80,6 +80,29 @@ curl -s --max-time 15 -o /dev/null -X POST "$API/v1/orders" -H 'content-type: ap
 # The median says what it usually costs; p95 says what it costs when something
 # is contending. A mean would hide both.
 # ---------------------------------------------------------------------------
+# The one mutating path a terminal hammers: an order through the OMS into
+# the ledger — valuation, risk, execution, posting, fsync — measured as the
+# client sees it. Sides alternate so the position nets back to nothing.
+measure_orders() {
+  local samples="$1" times=() i t side
+  for ((i = 0; i < samples; i++)); do
+    side="BUY"; [ $((i % 2)) -eq 1 ] && side="SELL"
+    t="$(curl -s -o /dev/null -w '%{time_total}' --max-time 20 -X POST "$API/v1/orders" \
+      -H 'content-type: application/json' -H "authorization: Bearer $token" \
+      -H "idempotency-key: perf-order-$stamp-$i" \
+      -d "{\"account\":\"$account\",\"symbol\":\"BTCUSD\",\"side\":\"$side\",\"volume\":\"0.01\"}")"
+    times+=("$t")
+  done
+  printf '%s\n' "${times[@]}" | python3 -c "
+import sys
+xs = sorted(float(line) * 1000 for line in sys.stdin if line.strip())
+if not xs:
+    print('0 0'); raise SystemExit
+median = xs[len(xs) // 2]
+p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
+print(f'{median:.2f} {p95:.2f}')"
+}
+
 measure() {
   local label="$1" samples="$2" url="$3" auth="${4:-}"
   local times=() i t
@@ -119,6 +142,7 @@ checks=(
   "quotes|40|$API/v1/quotes||150"
   "feed-status|25|${MARKET_DATA:-http://127.0.0.1:27003}/v1/feed/status||100"
   "sessions|25|$API/v1/sessions||100"
+  "order-book|25|$API/v1/orders?account=$account|auth|250"
   "web-page|15|$WEB/||900"
 )
 
@@ -137,6 +161,17 @@ for spec in "${checks[@]}"; do
     bad "$(printf '%-12s median %7sms  p95 %7sms  EXCEEDS budget %sms' "$label" "$med" "$p95" "$budget")"
   fi
 done
+
+# The order path (10-oms -> 03-ledger: 08 valuation, 09 risk, 11 execution,
+# posting, fsync), 20 orders alternating sides. Budget 400ms: an order is a
+# transaction with a disk sync at the end, and it must still feel immediate.
+read -r med p95 <<< "$(measure_orders 20)"
+MEDIAN["order"]="$med"; P95["order"]="$p95"
+if python3 -c "import sys; sys.exit(0 if $med <= 400 else 1)"; then
+  pass "$(printf '%-12s median %7sms  p95 %7sms  (budget %sms)' order "$med" "$p95" 400)"
+else
+  bad "$(printf '%-12s median %7sms  p95 %7sms  EXCEEDS budget %sms' order "$med" "$p95" 400)"
+fi
 
 # ---------------------------------------------------------------------------
 # The deliberately expensive path.

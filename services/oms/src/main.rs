@@ -23,7 +23,7 @@
 //! there until something reconciles it (INV-093). An order gateway that guesses
 //! is an order gateway that double-fills.
 
-mod lifecycle;
+use oms::lifecycle;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -133,6 +133,11 @@ trait Core: Send + Sync {
     fn place(&self, body: &str, idempotency_key: &str) -> Result<(u16, String), String>;
     /// Close a position.
     fn close(&self, body: &str, idempotency_key: &str) -> Result<(u16, String), String>;
+    /// What the core holds under an idempotency key, if anything: the same
+    /// `(status, body)` shape a placement would have returned. `Ok(None)`
+    /// means the core has never seen the key — it is safe to place.
+    fn lookup(&self, account: &str, idempotency_key: &str)
+        -> Result<Option<(u16, String)>, String>;
 }
 
 /// The real core, over HTTP.
@@ -146,6 +151,75 @@ impl Core for LedgerCore {
     }
     fn close(&self, body: &str, idempotency_key: &str) -> Result<(u16, String), String> {
         self.call("/v1/positions/close", body, idempotency_key)
+    }
+    fn lookup(
+        &self,
+        account: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<(u16, String)>, String> {
+        let response = http::get(
+            &format!("{}/v1/accounts/{account}/orders", self.base),
+            CORE_TIMEOUT,
+        )
+        .map_err(|err| err.to_string())?;
+        if !response.is_success() {
+            return Err(format!("the core returned {} to a lookup", response.status));
+        }
+        let parsed = response.json().map_err(|err| err.to_string())?;
+        let Some(service_kit::json::Value::Array(rows)) = parsed.get("orders") else {
+            return Err("the core's order list is not a list".to_owned());
+        };
+        let Some(found) = rows
+            .iter()
+            .find(|row| row.str_field("clientKey") == Some(idempotency_key))
+        else {
+            return Ok(None);
+        };
+        // Rendered as the placement would have answered, so `settle` reads it
+        // the same way: a deal is a 201 with the order; a rejection a 422
+        // with the reason.
+        if let Some(rejection) = found
+            .get("rejection")
+            .filter(|r| !matches!(r, service_kit::json::Value::Null))
+        {
+            let code = rejection.str_field("code").unwrap_or("REJECTED");
+            let detail = rejection
+                .str_field("detail")
+                .unwrap_or("the core refused this order");
+            return Ok(Some((
+                422,
+                format!(
+                    r#"{{"error":"{}","detail":"{}","state":"REJECTED"}}"#,
+                    escape(code),
+                    escape(detail)
+                ),
+            )));
+        }
+        Ok(Some((201, render_value(found))))
+    }
+}
+
+/// A parsed JSON value written back out. The core's order row is forwarded
+/// as the outcome, so it has to round-trip through this service's own parser.
+fn render_value(value: &service_kit::json::Value) -> String {
+    use service_kit::json::Value;
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.clone(),
+        Value::String(s) => format!("\"{}\"", escape(s)),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(render_value).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(k, v)| format!("\"{}\":{}", escape(k), render_value(v)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     }
 }
 
@@ -246,8 +320,35 @@ fn submit(
     };
 
     // INV-091 — one client order id, one order, forever.
-    if let Some(existing) = orders.by_client_id(&key) {
-        return Some(Response::json(200, order_json(existing)));
+    //
+    // An order whose outcome is UNKNOWN (INV-093) is not left there on a
+    // retry: the core is *asked*. If it holds the key, that outcome is the
+    // answer; if it has never seen the key, the order never reached it and is
+    // placed — the same key, so still one order. If the core cannot be asked,
+    // the answer stays UNKNOWN. Nothing is ever assumed.
+    if let Some(existing) = orders.orders.iter_mut().find(|o| o.client_order_id == key) {
+        if existing.lifecycle.current() == OrderState::Unknown {
+            match core.lookup(&existing.account, &key) {
+                Ok(Some((status, body))) => settle(existing, status, &body),
+                Ok(None) => {
+                    let call = if closing {
+                        core.close(&request.body, &key)
+                    } else {
+                        core.place(&request.body, &key)
+                    };
+                    if let Ok((status, body)) = call {
+                        settle(existing, status, &body);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let status = if existing.lifecycle.current() == OrderState::Unknown {
+            503
+        } else {
+            200
+        };
+        return Some(Response::json(status, order_json(existing)));
     }
 
     let account = body.str_field("account").unwrap_or_default().to_owned();
@@ -429,6 +530,7 @@ mod tests {
     struct StubCore {
         reply: Result<(u16, String), String>,
         calls: Mutex<usize>,
+        holds: Mutex<bool>,
     }
 
     impl StubCore {
@@ -439,22 +541,30 @@ mod tests {
                     r#"{"state":"FILLED","deal":{"price":"1.08512"}}"#.to_owned(),
                 )),
                 calls: Mutex::new(0),
+                holds: Mutex::new(false),
             }
         }
         fn refused() -> Self {
             Self {
                 reply: Ok((422, r#"{"error":"INSUFFICIENT_FREE_MARGIN"}"#.to_owned())),
                 calls: Mutex::new(0),
+                holds: Mutex::new(false),
             }
         }
         fn unreachable() -> Self {
             Self {
                 reply: Err("connection refused".to_owned()),
                 calls: Mutex::new(0),
+                holds: Mutex::new(false),
             }
         }
         fn count(&self) -> usize {
             *self.calls.lock().unwrap()
+        }
+        /// Whether the stubbed core already holds the key on lookup.
+        fn holding(self, held: bool) -> Self {
+            *self.holds.lock().unwrap() = held;
+            self
         }
         fn record(&self) -> Result<(u16, String), String> {
             *self.calls.lock().unwrap() += 1;
@@ -468,6 +578,16 @@ mod tests {
         }
         fn close(&self, _body: &str, _key: &str) -> Result<(u16, String), String> {
             self.record()
+        }
+        fn lookup(&self, _account: &str, _key: &str) -> Result<Option<(u16, String)>, String> {
+            // The stub's own reply, as what the core "holds": an unreachable
+            // core cannot be asked; a filled one holds a fill; a refusing one
+            // a refusal; `holds_nothing` a clean miss.
+            match (&self.reply, *self.holds.lock().unwrap()) {
+                (Err(err), _) => Err(err.clone()),
+                (_, false) => Ok(None),
+                (Ok(reply), true) => Ok(Some(reply.clone())),
+            }
         }
     }
 
@@ -561,6 +681,7 @@ mod tests {
                     .to_owned(),
             )),
             calls: Mutex::new(0),
+            holds: Mutex::new(false),
         };
         let response = handle(&orders, &core, &order_request("client-order-06")).unwrap();
 
@@ -595,30 +716,50 @@ mod tests {
         assert!(response.body.contains(r#""state":"UNKNOWN""#));
     }
 
-    /// And an unknown order, once retried, still resolves to one order — the
-    /// retry after a timeout is exactly the case INV-091 exists for.
+    /// INV-093 — an unknown order, retried, is *resolved by asking the core*,
+    /// never by guessing: a core that holds the key answers with what it
+    /// holds and is not asked to place again; a core that has never seen the
+    /// key is asked to place, once, under the same key; a core that cannot be
+    /// asked leaves the order UNKNOWN. In every case it is one order.
     #[test]
-    fn retrying_after_a_timeout_does_not_create_a_second_order() {
+    fn retrying_after_a_timeout_resolves_by_asking_the_core_and_never_makes_a_second_order() {
         let orders = Mutex::new(Orders::default());
         let timing_out = StubCore::unreachable();
         handle(&orders, &timing_out, &order_request("client-order-04")).unwrap();
 
-        let now_working = StubCore::filled();
-        let retried = handle(&orders, &now_working, &order_request("client-order-04")).unwrap();
-
-        assert_eq!(
-            now_working.count(),
-            0,
-            "the retry must not reach the core again"
-        );
+        // Still unreachable: still unknown, and still one order.
+        let retried = handle(&orders, &timing_out, &order_request("client-order-04")).unwrap();
+        assert_eq!(retried.status, 503);
         assert!(retried.body.contains(r#""state":"UNKNOWN""#));
+
+        // The core is back and holds the fill: resolved without placing.
+        let holding = StubCore::filled().holding(true);
+        let resolved = handle(&orders, &holding, &order_request("client-order-04")).unwrap();
+        assert_eq!(holding.count(), 0, "a held key is not placed again");
+        assert_eq!(resolved.status, 200);
+        assert!(
+            resolved.body.contains(r#""state":"SETTLED""#),
+            "{}",
+            resolved.body
+        );
+
+        // A second unknown order whose key the core never saw: placed once.
+        handle(&orders, &timing_out, &order_request("client-order-05")).unwrap();
+        let clean = StubCore::filled();
+        let placed = handle(&orders, &clean, &order_request("client-order-05")).unwrap();
+        assert_eq!(clean.count(), 1, "an unseen key is placed exactly once");
+        assert!(placed.body.contains(r#""state":"SETTLED""#));
+        let again = handle(&orders, &clean, &order_request("client-order-05")).unwrap();
+        assert_eq!(clean.count(), 1, "a settled order is never placed again");
+        assert!(again.body.contains(r#""state":"SETTLED""#));
+
         let listed = handle(
             &orders,
-            &now_working,
+            &clean,
             &Request::get("/v1/orders?account=50000001"),
         )
         .unwrap();
-        assert_eq!(listed.body.matches(r#""clientOrderId""#).count(), 1);
+        assert_eq!(listed.body.matches(r#""clientOrderId""#).count(), 2);
     }
 
     #[test]

@@ -10,8 +10,16 @@
  * it at all — that is the core's job (P8, INV-180).
  */
 
-/** Matches an exact decimal: optional sign, digits, optional fractional part. */
-const DECIMAL = /^-?(?:0|[1-9]\d{0,17})(?:\.\d{1,8})?$/;
+/**
+ * Matches an exact, canonical, non-negative decimal: digits with no leading
+ * zero (except a lone `0`), an optional fractional part of up to eight places.
+ *
+ * No sign. Every amount that crosses this edge is a magnitude — a deposit, a
+ * volume — and its direction is the request's kind or side, never a minus
+ * sign that a later reader might miss. A negative "deposit" has no meaning
+ * the ledger would accept, so it is refused here, at the door.
+ */
+const DECIMAL = /^(?:0|[1-9]\d{0,17})(?:\.\d{1,8})?$/;
 
 /**
  * Validate a money string without converting it.

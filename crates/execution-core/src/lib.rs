@@ -338,6 +338,7 @@ mod tests {
             market_age_ms: 0,
             account_tradable: true,
             session_open: true,
+            closes_position: false,
         };
         match assess(&intent, &flat("100000.00"), &MarginPolicy { ..POLICY }) {
             Decision::Approved(approval) => *approval,

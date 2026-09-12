@@ -579,6 +579,65 @@ else
   bad "the API believes x-forwarded-for from any caller"
 fi
 
+# ---------------------------------------------------------------------------
+# The core services' own surfaces (07, 08, 09, 10, 11, 06).
+#
+# They sit behind the client API on a private network, but "can someone take
+# what is not theirs" applies to them too: a malformed body, an absurd size, a
+# key someone else used, a symbol that is a path — each must be refused with a
+# 4xx and leave the process healthy. A 5xx here is a crash a caller can cause
+# at will; a 2xx is a rule that was not enforced.
+# ---------------------------------------------------------------------------
+echo "  -- core surfaces --"
+LEDGER="${LEDGER:-http://127.0.0.1:27002}"
+OMS="${OMS:-http://127.0.0.1:27005}"
+PRICING="${PRICING:-http://127.0.0.1:27004}"
+MARKET_DATA="${MARKET_DATA:-http://127.0.0.1:27003}"
+if curl -sf --max-time 3 "$LEDGER/health" >/dev/null 2>&1 && curl -sf --max-time 3 "$OMS/health" >/dev/null 2>&1; then
+  core_fail=0
+  core_probe() {
+    # $1 label, $2 method, $3 url, $4 body, $5 extra header (optional)
+    local code
+    if [ -n "${5:-}" ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$2" "$3" -H 'content-type: application/json' -H "$5" -d "$4")"
+    else
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$2" "$3" -H 'content-type: application/json' -d "$4")"
+    fi
+    if [ "$code" -ge 500 ] || [ "$code" = "000" ]; then
+      bad "core surface: $1 -> HTTP $code (a caller can produce a server error)"; core_fail=1
+    elif [ "$code" -lt 400 ]; then
+      bad "core surface: $1 -> HTTP $code (accepted what must be refused)"; core_fail=1
+    fi
+  }
+  core_probe "ledger: order without a key"      POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"0.10"}'
+  core_probe "ledger: order with a JSON number"  POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":0.1}' 'idempotency-key: sec-core-0001'
+  core_probe "ledger: order with a path symbol"  POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"../../etc","side":"BUY","volume":"0.10"}' 'idempotency-key: sec-core-0002'
+  core_probe "ledger: absurd volume"             POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"99999999999999999999.999"}' 'idempotency-key: sec-core-0003'
+  core_probe "ledger: not JSON"                  POST "$LEDGER/v1/orders" 'not json at all' 'idempotency-key: sec-core-0004'
+  core_probe "ledger: demo credit on no account" POST "$LEDGER/v1/accounts/1/demo-credit" '{"amount":"1.00"}' 'idempotency-key: sec-core-0005'
+  core_probe "ledger: negative credit"           POST "$LEDGER/v1/accounts/50000001/demo-credit" '{"amount":"-1.00"}' 'idempotency-key: sec-core-0006'
+  core_probe "ledger: status to nonsense"        POST "$LEDGER/v1/accounts/50000001/status" '{"status":"rich"}'
+  core_probe "oms: order without a key"          POST "$OMS/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"0.10"}'
+  core_probe "oms: empty body"                   POST "$OMS/v1/orders" '{}' 'idempotency-key: sec-core-0007'
+  core_probe "oms: not JSON"                     POST "$OMS/v1/orders" '{{{{' 'idempotency-key: sec-core-0008'
+  core_probe "market-data: unknown source"       POST "$MARKET_DATA/v1/feed/ticks" '{"source":"nasa","ticks":[]}'
+  core_probe "market-data: crossed tick"         POST "$MARKET_DATA/v1/feed/ticks" '{"source":"sim-lp","ticks":[{"symbol":"EURUSD","bid":"2","ask":"1"}]}'
+  core_probe "market-data: unknown class"        POST "$MARKET_DATA/v1/feed/source" '{"class":"Bonds","sources":["synthetic"]}'
+  core_probe "market-data: path symbol"          GET  "$MARKET_DATA/v1/quote?symbol=../../etc" ''
+  core_probe "pricing: unknown instrument"       GET  "$PRICING/v1/quote?symbol=NOPE" ''
+  # A 200KB body must be refused, not buffered.
+  big="$(head -c 200000 /dev/zero | tr '\0' 'a')"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "$LEDGER/v1/orders" -H 'content-type: application/json' -H 'idempotency-key: sec-core-0009' -d "{\"account\":\"$big\"}")"
+  if [ "$code" -ge 400 ] && [ "$code" -lt 500 ]; then :; else bad "core surface: ledger accepted or crashed on a 200KB body (HTTP $code)"; core_fail=1; fi
+  for svc in ledger oms pricing market-data; do
+    url="$LEDGER"; [ "$svc" = oms ] && url="$OMS"; [ "$svc" = pricing ] && url="$PRICING"; [ "$svc" = market-data ] && url="$MARKET_DATA"
+    curl -sf --max-time 3 "$url/health" >/dev/null 2>&1 || { bad "core surface: $svc is not healthy after the probes"; core_fail=1; }
+  done
+  [ "$core_fail" -eq 0 ] && pass "core surfaces refuse malformed, oversized and out-of-bounds input with 4xx and stay healthy"
+else
+  skip "core services not reachable — their surfaces unprobed"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
   [ "$skipped" -gt 0 ] && echo "✓ security holds ($skipped check(s) skipped — tooling unavailable)" \

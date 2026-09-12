@@ -20,7 +20,7 @@ use std::time::Duration;
 use domain_kernel::Price;
 use market_core::feed::parse_price_raw;
 use market_core::instrument::{find, INSTRUMENTS};
-use market_core::{tick_of, Instrument, MarketError, Quote, TICK_MS};
+use market_core::{tick_of, Instrument, Quote, TICK_MS};
 use service_kit::json::{escape, Value};
 use service_kit::{log, port_from_env, Request, Response, Service, ServiceInfo};
 
@@ -80,53 +80,7 @@ fn venue_from_json(instrument: &Instrument, body: &Value) -> Option<Quote> {
     })
 }
 
-/// The pricing configuration in force.
-///
-/// Versioned because every quote is only meaningful alongside the config that
-/// produced it (INV-063). A markup changed without a version change is a quote
-/// nobody can reproduce.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct PricingConfig {
-    version: &'static str,
-    /// Client markup applied around the venue mid, in basis points.
-    markup_bps: i128,
-    /// The oldest market state a quote may be derived from (INV-062).
-    max_age_ms: u64,
-}
-
-const CONFIG: PricingConfig = PricingConfig {
-    version: "pricing-v1",
-    markup_bps: 20,
-    // The default; the service reads MAX_QUOTE_STALENESS_MS at startup. Two
-    // seconds matches what risk will accept (`risk_core::MAX_MARKET_AGE_MS`):
-    // a real feed delivers on its own cadence, and a quote a second old is
-    // the market, not a fault. Stale is still refused, just at the same
-    // line the rest of the system draws.
-    max_age_ms: 2_000,
-};
-
-/// The client quote derived from a venue quote, as raw price units.
-///
-/// Works on the raw price scale rather than on `Money`, because a price carries
-/// more decimal places than a currency does and rounding it to cents first
-/// would move the quote.
-fn client_quote(
-    venue: &Quote,
-    instrument: &Instrument,
-    config: &PricingConfig,
-) -> Result<(i128, i128, i128), MarketError> {
-    let mid = venue.mid().raw();
-    // Half the markup either side, rounded up so the spread never narrows by
-    // accident, then snapped to the instrument's quoted grid.
-    let half = mid
-        .saturating_mul(config.markup_bps)
-        .saturating_add(19_999)
-        .checked_div(20_000)
-        .unwrap_or(0);
-    let bid = instrument.on_grid(mid.saturating_sub(half));
-    let ask = instrument.on_grid(mid.saturating_add(half));
-    Ok((bid, mid, ask))
-}
+use pricing::{client_quote, PricingConfig, CONFIG};
 
 fn error(status: u16, code: &str, detail: &str) -> Response {
     Response::json(

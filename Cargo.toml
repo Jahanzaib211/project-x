@@ -13,6 +13,7 @@ members = [
     "crates/service-kit",
     "tests/invariants",
     "tests/replay",
+    "tests/integration",
     "services/ledger",
     "services/market-data",
     "services/pricing",

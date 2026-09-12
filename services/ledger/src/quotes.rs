@@ -32,7 +32,6 @@ impl QuoteSet {
     }
 
     /// The pure synthetic state at `tick`, for tests and for the gate suite.
-    #[cfg(test)]
     #[must_use]
     pub fn synthetic(tick: u64) -> Self {
         let mut quotes = BTreeMap::new();
@@ -102,14 +101,12 @@ impl QuoteSet {
     }
 
     /// How many instruments are priced.
-    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.quotes.len()
     }
 
     /// Whether nothing is priced.
-    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.quotes.is_empty()
@@ -141,10 +138,8 @@ pub trait QuoteSource: Send + Sync {
 }
 
 /// The pure function, for tests and the in-memory gate runs.
-#[cfg(test)]
 pub struct SyntheticSource;
 
-#[cfg(test)]
 impl QuoteSource for SyntheticSource {
     fn quotes_at(&self, tick: u64) -> Result<QuoteSet, String> {
         Ok(QuoteSet::synthetic(tick))

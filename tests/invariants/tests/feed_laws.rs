@@ -9,7 +9,11 @@
 //! streams — including crossed, negative, absurd and out-of-order ones —
 //! with a seed that reproduces any failure.
 
-#![allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
+)]
 
 use invariants::{for_all, Gen};
 use market_core::feed::{FeedStore, Recorded, MAX_JUMP_BPS, MAX_SPREAD_BPS};
@@ -36,7 +40,7 @@ fn generate(g: &mut Gen, reference: i128) -> (i128, i128) {
 /// or absurdly wide quote, and every quote it serves passes the same checks.
 #[test]
 fn inv_050_nothing_invalid_is_ever_held() {
-    for_all("nothing invalid is held", 3_000, 0x50_50, |g| {
+    for_all("nothing invalid is held", 3_000, 0x5050, |g| {
         let mut store = FeedStore::new();
         let instrument = INSTRUMENTS[g.in_range(0, INSTRUMENTS.len() as i128 - 1) as usize];
         let mut tick = OPEN;
@@ -70,7 +74,7 @@ fn inv_050_nothing_invalid_is_ever_held() {
 /// counted; the record is in tick order whatever the arrival order.
 #[test]
 fn inv_122_duplicates_once_and_reorders_kept_in_order() {
-    for_all("duplicates and reorders", 2_000, 0x12_21, |g| {
+    for_all("duplicates and reorders", 2_000, 0x1221, |g| {
         let mut store = FeedStore::new();
         let instrument = find("EURUSD").unwrap();
         let mid = instrument.reference_raw;
@@ -117,7 +121,7 @@ fn inv_122_duplicates_once_and_reorders_kept_in_order() {
 /// the same digest; any difference in content or order changes it.
 #[test]
 fn inv_054_the_digest_is_a_function_of_the_accepted_records() {
-    for_all("digest determinism", 1_500, 0x05_04, |g| {
+    for_all("digest determinism", 1_500, 0x0504, |g| {
         let instrument = find("BTCUSD").unwrap();
         let mut a = FeedStore::new();
         let mut b = FeedStore::new();
@@ -155,7 +159,7 @@ fn inv_054_the_digest_is_a_function_of_the_accepted_records() {
 /// is refused; outside the session the served quote is frozen and marked so.
 #[test]
 fn inv_050_spikes_refused_and_inv_053_frozen_outside_session() {
-    for_all("spikes and sessions", 1_500, 0x05_53, |g| {
+    for_all("spikes and sessions", 1_500, 0x0553, |g| {
         let instrument = find("XAUUSD").unwrap();
         let mut store = FeedStore::new();
         let mid = instrument.reference_raw;

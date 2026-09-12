@@ -102,6 +102,64 @@ impl Rejection {
     }
 }
 
+impl Rejection {
+    /// Recover a rejection from its logged form: the code plus the numbers
+    /// the code carries, in the order [`Rejection::code`] lists them.
+    ///
+    /// Used when a journal replays a refused order (INV-082: a decision is
+    /// kept). `None` for a code this version does not know.
+    #[must_use]
+    pub fn from_logged(code: &str, numbers: &[i128]) -> Option<Self> {
+        let n = |i: usize| numbers.get(i).copied().unwrap_or(0);
+        Some(match code {
+            "UNKNOWN_INSTRUMENT" => Self::UnknownInstrument,
+            "ACCOUNT_NOT_TRADABLE" => Self::AccountNotTradable,
+            "VOLUME_BELOW_MINIMUM" => Self::VolumeBelowMinimum {
+                minimum_milli_lots: n(0),
+            },
+            "VOLUME_ABOVE_MAXIMUM" => Self::VolumeAboveMaximum {
+                maximum_milli_lots: n(0),
+            },
+            "INSUFFICIENT_FREE_MARGIN" => Self::InsufficientFreeMargin {
+                required_minor: n(0),
+                available_minor: n(1),
+            },
+            "MARGIN_LEVEL_TOO_LOW" => Self::MarginLevelTooLow {
+                level_bp: n(0),
+                threshold_bp: n(1),
+            },
+            "STALE_MARKET" => Self::StaleMarket {
+                age_ms: u64::try_from(n(0)).unwrap_or(0),
+            },
+            "MARKET_CLOSED" => Self::MarketClosed,
+            "RISK_ENGINE_UNAVAILABLE" => Self::EngineUnavailable,
+            _ => return None,
+        })
+    }
+
+    /// The numbers a rejection carries, in a stable order, for the log.
+    #[must_use]
+    pub fn numbers(self) -> Vec<i128> {
+        match self {
+            Self::VolumeBelowMinimum { minimum_milli_lots } => vec![minimum_milli_lots],
+            Self::VolumeAboveMaximum { maximum_milli_lots } => vec![maximum_milli_lots],
+            Self::InsufficientFreeMargin {
+                required_minor,
+                available_minor,
+            } => vec![required_minor, available_minor],
+            Self::MarginLevelTooLow {
+                level_bp,
+                threshold_bp,
+            } => vec![level_bp, threshold_bp],
+            Self::StaleMarket { age_ms } => vec![i128::from(age_ms)],
+            Self::UnknownInstrument
+            | Self::AccountNotTradable
+            | Self::MarketClosed
+            | Self::EngineUnavailable => Vec::new(),
+        }
+    }
+}
+
 impl core::fmt::Display for Rejection {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -272,6 +330,13 @@ pub struct OrderIntent<'a> {
     pub account_tradable: bool,
     /// Whether the instrument's market is open at `tick` (INV-084).
     pub session_open: bool,
+    /// Whether this order closes out the whole of an existing position.
+    ///
+    /// The venue's minimum order size is a rule about *opening*. A residual
+    /// position below it — left by a partial close, or by two orders that
+    /// netted — must still be closable, or it is a position the client can
+    /// never leave. Every other check applies to a close as to any order.
+    pub closes_position: bool,
 }
 
 /// The oldest market state an order may be assessed against (INV-062).
@@ -295,7 +360,15 @@ pub fn assess(intent: &OrderIntent<'_>, valuation: &Valuation, policy: &MarginPo
     }
 
     let milli_lots = milli_lots_of(intent.quantity, intent.instrument);
-    if milli_lots < intent.instrument.min_volume_milli_lots {
+    if milli_lots <= 0 {
+        return reject(
+            Rejection::VolumeBelowMinimum {
+                minimum_milli_lots: intent.instrument.min_volume_milli_lots,
+            },
+            None,
+        );
+    }
+    if milli_lots < intent.instrument.min_volume_milli_lots && !intent.closes_position {
         return reject(
             Rejection::VolumeBelowMinimum {
                 minimum_milli_lots: intent.instrument.min_volume_milli_lots,
@@ -449,6 +522,7 @@ mod tests {
             market_age_ms: 0,
             account_tradable: true,
             session_open: true,
+            closes_position: false,
         }
     }
 
@@ -601,6 +675,33 @@ mod tests {
         assert!(assess(&order, &flat("10000.00"), &POLICY).is_approved());
     }
 
+    /// A residual below the venue minimum can still be closed — and only
+    /// closed: the same size as an opening order is refused, and zero is
+    /// refused either way.
+    #[test]
+    fn a_residual_below_the_minimum_can_be_closed_but_not_opened() {
+        let eurusd = find("EURUSD").unwrap();
+        let mut order = intent(eurusd, 5); // 0.005 lots, below the 0.010 minimum
+        assert!(matches!(
+            assess(&order, &flat("10000.00"), &POLICY),
+            Decision::Rejected {
+                reason: Rejection::VolumeBelowMinimum { .. },
+                ..
+            }
+        ));
+        order.closes_position = true;
+        assert!(assess(&order, &flat("10000.00"), &POLICY).is_approved());
+        let mut zero = intent(eurusd, 0);
+        zero.closes_position = true;
+        assert!(matches!(
+            assess(&zero, &flat("10000.00"), &POLICY),
+            Decision::Rejected {
+                reason: Rejection::VolumeBelowMinimum { .. },
+                ..
+            }
+        ));
+    }
+
     /// INV-084 — a closed market is refused before price or margin is
     /// considered, however well funded the account is.
     #[test]
@@ -678,8 +779,38 @@ mod tests {
         }
     }
 
+    const ALL_REASONS: [Rejection; 9] = [
+        Rejection::UnknownInstrument,
+        Rejection::AccountNotTradable,
+        Rejection::VolumeBelowMinimum {
+            minimum_milli_lots: 10,
+        },
+        Rejection::VolumeAboveMaximum {
+            maximum_milli_lots: 50_000,
+        },
+        Rejection::InsufficientFreeMargin {
+            required_minor: 1,
+            available_minor: 0,
+        },
+        Rejection::MarginLevelTooLow {
+            level_bp: 1,
+            threshold_bp: 2,
+        },
+        Rejection::StaleMarket { age_ms: 1 },
+        Rejection::MarketClosed,
+        Rejection::EngineUnavailable,
+    ];
+
     #[test]
     fn every_rejection_has_a_stable_code_and_readable_text() {
+        for reason in ALL_REASONS {
+            assert_eq!(
+                Rejection::from_logged(reason.code(), &reason.numbers()),
+                Some(reason),
+                "{reason:?} does not survive the log"
+            );
+        }
+        assert_eq!(Rejection::from_logged("NOPE", &[]), None);
         for reason in [
             Rejection::UnknownInstrument,
             Rejection::AccountNotTradable,

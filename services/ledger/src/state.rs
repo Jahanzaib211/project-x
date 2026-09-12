@@ -522,6 +522,30 @@ impl Core {
         quotes: &QuoteSet,
         client_key: &str,
     ) -> Result<OrderRecord, CoreError> {
+        self.place(
+            account_number,
+            symbol,
+            side,
+            milli_lots,
+            tick,
+            quotes,
+            client_key,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &mut self,
+        account_number: &str,
+        symbol: &str,
+        side: Side,
+        milli_lots: i128,
+        tick: u64,
+        quotes: &QuoteSet,
+        client_key: &str,
+        closes_position: bool,
+    ) -> Result<OrderRecord, CoreError> {
         // INV-181 — a retry returns the first outcome, it does not place a
         // second order.
         if let Some(existing) = self.order_by_key(account_number, client_key) {
@@ -559,14 +583,17 @@ impl Core {
             account_tradable: account.may_originate(),
             // INV-084 — the quote knows whether it is live or frozen.
             session_open: quote.session_open(),
+            closes_position,
         };
 
         let order_id = self.take_id();
         match assess(&intent, &valuation, &POLICY) {
             Decision::Rejected { reason, .. } => {
-                // A rejection is a decision and it is kept (INV-082). It posts
-                // nothing, so it does not go in the durable log — nothing
-                // financial happened — but the client is told exactly why.
+                // A rejection is a decision and it is kept (INV-082) — durably,
+                // because the order history and the idempotency key must
+                // survive a restart (INV-181): a client retrying a refused
+                // order after a restart must get the same refusal, not a fill.
+                // It posts nothing to the journal: nothing financial happened.
                 let record = OrderRecord {
                     order_id,
                     client_key: client_key.to_owned(),
@@ -578,6 +605,7 @@ impl Core {
                     deal: None,
                     rejection: Some(reason),
                 };
+                self.append_log(&rejection_record(&record, reason))?;
                 self.orders.push(record);
                 Err(CoreError::Refused(reason))
             }
@@ -595,8 +623,9 @@ impl Core {
                     .map_err(CoreError::Execution)?;
 
                 // Durable before acknowledged. A fill the client was told about
-                // must survive the process dying immediately afterwards.
-                self.append_log(&deal_record(&deal))?;
+                // must survive the process dying immediately afterwards — and
+                // so must the order it answered, key and all.
+                self.append_log(&deal_record(&deal, client_key, milli_lots))?;
 
                 self.book = scratch;
                 self.journal
@@ -656,7 +685,9 @@ impl Core {
         if milli <= 0 {
             return Err(CoreError::NothingToClose);
         }
-        self.place_order(
+        // A close is the whole residual, whatever its size: a position below
+        // the venue's opening minimum is still the client's to leave.
+        self.place(
             account_number,
             symbol,
             side,
@@ -664,6 +695,7 @@ impl Core {
             tick,
             quotes,
             client_key,
+            true,
         )
     }
 
@@ -767,13 +799,27 @@ impl Core {
                     read_transaction(record.get("transaction").ok_or("no transaction")?)
                         .ok_or("malformed transaction record")?;
                 self.bump_id_past(record);
-                self.book.apply(&fill).map_err(|err| err.to_string())?;
+                let effect = self.book.apply(&fill).map_err(|err| err.to_string())?;
                 self.journal
                     .append(transaction.clone())
                     .map_err(|err| err.to_string())?;
                 self.balances
                     .apply(&transaction)
-                    .map_err(|err| err.to_string())
+                    .map_err(|err| err.to_string())?;
+                // The order the deal answered, rebuilt so the history and the
+                // idempotency key are what they were (INV-082, INV-181).
+                // Records from before the order fields were logged still
+                // replay their money; only their history entry is absent.
+                if let Some(order) = read_order_of_deal(record, &fill, transaction, effect) {
+                    self.orders.push(order);
+                }
+                Ok(())
+            }
+            Some("rejection") => {
+                self.bump_id_past(record);
+                let order = read_rejection(record).ok_or("malformed rejection record")?;
+                self.orders.push(order);
+                Ok(())
             }
             _ => Err("unknown record type".to_owned()),
         }
@@ -858,9 +904,9 @@ fn credit_record(credit: &CreditRecord) -> String {
     )
 }
 
-fn deal_record(deal: &Deal) -> String {
+fn deal_record(deal: &Deal, client_key: &str, milli_lots: i128) -> String {
     format!(
-        r#"{{"type":"deal","dealId":{},"orderId":{},"fillEventId":{},"account":"{}","symbol":"{}","side":"{}","quantityRaw":{},"priceRaw":{},"tick":{},"transaction":{}}}"#,
+        r#"{{"type":"deal","dealId":{},"orderId":{},"fillEventId":{},"account":"{}","symbol":"{}","side":"{}","quantityRaw":{},"priceRaw":{},"tick":{},"clientKey":"{}","milliLots":{milli_lots},"commissionMinor":{},"realisedMinor":{},"closedQuantityRaw":{},"reversed":{},"transaction":{}}}"#,
         deal.ids.deal_id.0,
         deal.ids.order_id.0,
         deal.ids.fill_event_id.0,
@@ -874,8 +920,105 @@ fn deal_record(deal: &Deal) -> String {
         deal.quantity.raw(),
         deal.price.raw(),
         deal.tick,
+        escape(client_key),
+        deal.commission.minor(),
+        deal.realised.minor(),
+        deal.closed_quantity.raw(),
+        deal.reversed,
         transaction_json(&deal.transaction)
     )
+}
+
+fn rejection_record(order: &OrderRecord, reason: Rejection) -> String {
+    format!(
+        r#"{{"type":"rejection","orderId":{},"account":"{}","symbol":"{}","side":"{}","milliLots":{},"tick":{},"clientKey":"{}","code":"{}","numbers":[{}]}}"#,
+        order.order_id.0,
+        escape(&order.account),
+        escape(&order.symbol),
+        if order.side == Side::Buy {
+            "BUY"
+        } else {
+            "SELL"
+        },
+        order.milli_lots,
+        order.tick,
+        escape(&order.client_key),
+        escape(reason.code()),
+        reason
+            .numbers()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+/// The order a logged deal answered, if the record carries the order fields.
+fn read_order_of_deal(
+    record: &Value,
+    fill: &Fill,
+    transaction: Transaction,
+    effect: position_core::FillEffect,
+) -> Option<OrderRecord> {
+    let client_key = record.str_field("clientKey")?.to_owned();
+    let milli_lots = read_i128(record.get("milliLots"))?;
+    let deal = Deal {
+        ids: DealIds {
+            deal_id: Id(u128::from(record.get("dealId").and_then(Value::as_u64)?)),
+            order_id: Id(u128::from(record.get("orderId").and_then(Value::as_u64)?)),
+            fill_event_id: fill.event_id,
+            transaction_id: transaction.id(),
+        },
+        account: fill.account.clone(),
+        symbol: fill.symbol.clone(),
+        side: fill.side,
+        quantity: fill.quantity,
+        price: fill.price,
+        tick: fill.tick,
+        commission: Money::<Usd>::from_minor(read_i128(record.get("commissionMinor"))?),
+        realised: Money::<Usd>::from_minor(read_i128(record.get("realisedMinor"))?),
+        closed_quantity: Quantity::from_raw(read_i128(record.get("closedQuantityRaw"))?),
+        reversed: matches!(record.get("reversed"), Some(Value::Bool(true))),
+        transaction,
+        effect,
+    };
+    Some(OrderRecord {
+        order_id: deal.ids.order_id,
+        client_key,
+        account: deal.account.clone(),
+        symbol: deal.symbol.clone(),
+        side: deal.side,
+        milli_lots,
+        tick: deal.tick,
+        deal: Some(deal),
+        rejection: None,
+    })
+}
+
+fn read_rejection(record: &Value) -> Option<OrderRecord> {
+    let numbers: Vec<i128> = match record.get("numbers") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| read_i128(Some(v)))
+            .collect::<Option<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+    let reason = Rejection::from_logged(record.str_field("code")?, &numbers)?;
+    Some(OrderRecord {
+        order_id: Id(u128::from(record.get("orderId").and_then(Value::as_u64)?)),
+        client_key: record.str_field("clientKey")?.to_owned(),
+        account: record.str_field("account")?.to_owned(),
+        symbol: record.str_field("symbol")?.to_owned(),
+        side: match record.str_field("side")? {
+            "BUY" => Side::Buy,
+            "SELL" => Side::Sell,
+            _ => return None,
+        },
+        milli_lots: read_i128(record.get("milliLots"))?,
+        tick: record.get("tick").and_then(Value::as_u64)?,
+        deal: None,
+        rejection: Some(reason),
+    })
 }
 
 fn read_i128(value: Option<&Value>) -> Option<i128> {
@@ -1182,37 +1325,108 @@ mod tests {
         assert_eq!(text.lines().count(), 2, "one line per effect, no more");
     }
 
-    /// A rejected order posts nothing, so it must leave no trace in the log —
-    /// and it must not consume the client's idempotency key for a later,
-    /// legitimate order.
+    /// A rejected order posts nothing to the journal — it is not a financial
+    /// effect — but it is a decision, and decisions survive a restart
+    /// (INV-082): the history still shows it, and a retry of the same key
+    /// after a restart gets the same refusal rather than a second look.
     #[test]
-    fn a_rejected_order_writes_nothing_to_the_log() {
+    fn a_rejected_order_is_kept_but_posts_nothing() {
         let scratch = Scratch::new("rejected");
-        let mut core = Core::open(scratch.path()).unwrap();
-        let account = core
-            .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
-            .unwrap();
-        let before = scratch.text();
+        let account = {
+            let mut core = Core::open(scratch.path()).unwrap();
+            let account = core
+                .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
+                .unwrap();
+            let journal_before = core.version();
 
-        let refused = core.place_order(
+            let refused = core.place_order(
+                &account.number,
+                "EURUSD",
+                Side::Buy,
+                49_000,
+                1_526_000,
+                &QuoteSet::synthetic(1_526_000),
+                "key-refused-01",
+            );
+            assert!(matches!(refused, Err(CoreError::Refused(_))));
+            assert_eq!(core.version(), journal_before, "a refusal posts nothing");
+            assert!(!scratch.text().contains(r#""type":"deal""#));
+            assert!(scratch.text().contains(r#""type":"rejection""#));
+            assert_eq!(core.orders_of(&account.number).len(), 1);
+            assert_eq!(core.orders_of(&account.number)[0].state(), "REJECTED");
+            account
+        };
+
+        let mut reopened = Core::open(scratch.path()).unwrap();
+        let history = reopened.orders_of(&account.number);
+        assert_eq!(history.len(), 1, "the refusal survived the restart");
+        assert_eq!(history[0].state(), "REJECTED");
+        assert_eq!(history[0].client_key, "key-refused-01");
+        assert!(matches!(
+            history[0].rejection,
+            Some(Rejection::InsufficientFreeMargin { .. })
+        ));
+        // The same key again is the same decision, not a fresh order.
+        let again = reopened.place_order(
             &account.number,
             "EURUSD",
             Side::Buy,
-            49_000,
-            1_526_000,
-            &QuoteSet::synthetic(1_526_000),
+            10,
+            1_526_100,
+            &QuoteSet::synthetic(1_526_100),
             "key-refused-01",
         );
-        assert!(matches!(refused, Err(CoreError::Refused(_))));
-        assert_eq!(
-            scratch.text(),
-            before,
-            "a refusal is not a financial effect"
-        );
+        assert!(again.is_ok_and(|o| o.state() == "REJECTED"));
+        assert_eq!(reopened.orders_of(&account.number).len(), 1);
+    }
 
-        // It is still recorded as a decision, though (INV-082).
-        assert_eq!(core.orders_of(&account.number).len(), 1);
-        assert_eq!(core.orders_of(&account.number)[0].state(), "REJECTED");
+    /// INV-181 across a restart: a filled order's key is remembered, so a
+    /// client retrying after the process died gets the first fill back and
+    /// no second one.
+    #[test]
+    fn inv_181_a_retried_order_after_a_restart_is_the_same_order() {
+        let scratch = Scratch::new("retry");
+        let (account, first_deal) = {
+            let mut core = Core::open(scratch.path()).unwrap();
+            let account = core
+                .open_account("dev-owner-0001", "Demo", 500, Mode::Demo, 1_526_000)
+                .unwrap()
+                .number;
+            let filled = core
+                .place_order(
+                    &account,
+                    "EURUSD",
+                    Side::Buy,
+                    100,
+                    1_526_000,
+                    &QuoteSet::synthetic(1_526_000),
+                    "key-retry-0001",
+                )
+                .unwrap();
+            (account, filled.deal.unwrap().ids.deal_id)
+        };
+        let mut reopened = Core::open(scratch.path()).unwrap();
+        let history = reopened.orders_of(&account);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].deal.as_ref().unwrap().ids.deal_id, first_deal);
+        let again = reopened
+            .place_order(
+                &account,
+                "EURUSD",
+                Side::Buy,
+                100,
+                1_526_400,
+                &QuoteSet::synthetic(1_526_400),
+                "key-retry-0001",
+            )
+            .unwrap();
+        assert_eq!(again.deal.unwrap().ids.deal_id, first_deal);
+        assert_eq!(reopened.open_position_count(&account), 1);
+        assert_eq!(
+            reopened.version(),
+            2,
+            "one grant, one fill — no second fill"
+        );
     }
 
     /// The whole loop, asserted on the numbers: fund, buy, close, and the

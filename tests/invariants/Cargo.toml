@@ -10,6 +10,13 @@ publish.workspace = true
 domain-kernel = { path = "../../crates/domain-kernel" }
 event-kernel = { path = "../../crates/event-kernel" }
 market-core = { path = "../../crates/market-core" }
+ledger = { path = "../../services/ledger" }
+ledger-core = { path = "../../crates/ledger-core" }
+account-core = { path = "../../crates/account-core" }
+oms = { path = "../../services/oms" }
+pricing = { path = "../../services/pricing" }
+risk-core = { path = "../../crates/risk-core" }
+pnl-margin = { path = "../../crates/pnl-margin" }
 
 [lints]
 workspace = true

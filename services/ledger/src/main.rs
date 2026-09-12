@@ -13,9 +13,7 @@
 //! Time enters in exactly one place, [`now_tick`], for the same reason it does
 //! in `06-market-data`: everything else is a pure function of the tick.
 
-mod quotes;
-mod state;
-mod volume;
+use ledger::{quotes, state, volume};
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -181,8 +179,9 @@ fn order_json(record: &OrderRecord) -> String {
         },
     );
     format!(
-        r#"{{"orderId":"{}","state":"{}","account":"{}","symbol":"{}","side":"{}","volume":"{}","tick":{},"timestampMs":{},"deal":{deal},"rejection":{rejection}}}"#,
+        r#"{{"orderId":"{}","clientKey":"{}","state":"{}","account":"{}","symbol":"{}","side":"{}","volume":"{}","tick":{},"timestampMs":{},"deal":{deal},"rejection":{rejection}}}"#,
         record.order_id,
+        escape(&record.client_key),
         escape(record.state()),
         escape(&record.account),
         escape(&record.symbol),
