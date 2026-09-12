@@ -612,7 +612,16 @@ if curl -sf --max-time 3 "$LEDGER/health" >/dev/null 2>&1 && curl -sf --max-time
   core_probe "ledger: order without a key"      POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"0.10"}'
   core_probe "ledger: order with a JSON number"  POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":0.1}' 'idempotency-key: sec-core-0001'
   core_probe "ledger: order with a path symbol"  POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"../../etc","side":"BUY","volume":"0.10"}' 'idempotency-key: sec-core-0002'
-  core_probe "ledger: absurd volume"             POST "$LEDGER/v1/orders" '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"99999999999999999999.999"}' 'idempotency-key: sec-core-0003'
+  # A well-formed but absurd order is a *recorded* refusal — the order book
+  # keeps every rejection — so the acceptable outcomes are a 4xx or a 2xx
+  # whose state is REJECTED with no deal. A fill is the failure.
+  absurd="$(curl -s --max-time 5 -w '\n%{http_code}' -X POST "$LEDGER/v1/orders" -H 'content-type: application/json' -H "idempotency-key: sec-core-0003-$(date +%s)" -d '{"account":"50000001","symbol":"EURUSD","side":"BUY","volume":"99999999999999999999.999"}')"
+  absurd_code="${absurd##*$'\n'}"; absurd_body="${absurd%$'\n'*}"
+  if [ "${absurd_code:-0}" -ge 500 ] || [ "${absurd_code:-000}" = "000" ]; then
+    bad "core surface: ledger: absurd volume -> HTTP $absurd_code (a caller can produce a server error)"; core_fail=1
+  elif [ "${absurd_code:-0}" -lt 400 ] && ! { echo "$absurd_body" | grep -q '"state":"REJECTED"' && echo "$absurd_body" | grep -q '"deal":null'; }; then
+    bad "core surface: ledger: absurd volume -> HTTP $absurd_code and not a recorded rejection"; core_fail=1
+  fi
   core_probe "ledger: not JSON"                  POST "$LEDGER/v1/orders" 'not json at all' 'idempotency-key: sec-core-0004'
   core_probe "ledger: demo credit on no account" POST "$LEDGER/v1/accounts/1/demo-credit" '{"amount":"1.00"}' 'idempotency-key: sec-core-0005'
   core_probe "ledger: negative credit"           POST "$LEDGER/v1/accounts/50000001/demo-credit" '{"amount":"-1.00"}' 'idempotency-key: sec-core-0006'
@@ -625,10 +634,13 @@ if curl -sf --max-time 3 "$LEDGER/health" >/dev/null 2>&1 && curl -sf --max-time
   core_probe "market-data: unknown class"        POST "$MARKET_DATA/v1/feed/source" '{"class":"Bonds","sources":["synthetic"]}'
   core_probe "market-data: path symbol"          GET  "$MARKET_DATA/v1/quote?symbol=../../etc" ''
   core_probe "pricing: unknown instrument"       GET  "$PRICING/v1/quote?symbol=NOPE" ''
-  # A 200KB body must be refused, not buffered.
-  big="$(head -c 200000 /dev/zero | tr '\0' 'a')"
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "$LEDGER/v1/orders" -H 'content-type: application/json' -H 'idempotency-key: sec-core-0009' -d "{\"account\":\"$big\"}")"
-  if [ "$code" -ge 400 ] && [ "$code" -lt 500 ]; then :; else bad "core surface: ledger accepted or crashed on a 200KB body (HTTP $code)"; core_fail=1; fi
+  # A 200KB body must be refused, not buffered. The body goes through a
+  # file: a 200KB argument is over the kernel's single-argument limit.
+  bigfile="$(mktemp)"
+  { printf '{"account":"'; head -c 200000 /dev/zero | tr '\0' 'a'; printf '"}'; } >"$bigfile"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "$LEDGER/v1/orders" -H 'content-type: application/json' -H 'idempotency-key: sec-core-0009' --data-binary "@$bigfile")"
+  rm -f "$bigfile"
+  if [ "${code:-0}" -ge 400 ] && [ "${code:-0}" -lt 500 ]; then :; else bad "core surface: ledger accepted or crashed on a 200KB body (HTTP ${code:-none})"; core_fail=1; fi
   for svc in ledger oms pricing market-data; do
     url="$LEDGER"; [ "$svc" = oms ] && url="$OMS"; [ "$svc" = pricing ] && url="$PRICING"; [ "$svc" = market-data ] && url="$MARKET_DATA"
     curl -sf --max-time 3 "$url/health" >/dev/null 2>&1 || { bad "core surface: $svc is not healthy after the probes"; core_fail=1; }

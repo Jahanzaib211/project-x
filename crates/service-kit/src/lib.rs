@@ -25,7 +25,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// What a service says about itself.
 #[derive(Clone, Debug)]
@@ -408,6 +408,11 @@ impl Service {
             Ok(request) => self.dispatch(&request),
             Err(RequestError::TooLarge) => {
                 self.metrics.incr("projectx_http_rejected_total");
+                // The client is still sending. Closing with unread bytes in
+                // the socket makes the kernel reset the connection and the
+                // 413 never arrives; drain a bounded amount first so the
+                // refusal is actually delivered.
+                drain_oversized(&mut reader);
                 Response::json(413, r#"{"error":"request_too_large"}"#)
             }
             Err(RequestError::Malformed) => {
@@ -497,6 +502,26 @@ impl From<std::io::Error> for RequestError {
 const MAX_BODY_BYTES: usize = 64 * 1024;
 /// The most headers a request may carry.
 const MAX_HEADERS: usize = 64;
+
+/// The most of an oversized body that is read and discarded so the 413 can
+/// be delivered; beyond this the connection is simply dropped.
+const DRAIN_CAP_BYTES: usize = 1024 * 1024;
+/// How long draining may wait on a client that stops sending.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Read and discard the rest of an oversized request, bounded in bytes and
+/// time. Errors are irrelevant here: the response is a refusal either way.
+fn drain_oversized(reader: &mut BufReader<TcpStream>) {
+    let _ = reader.get_ref().set_read_timeout(Some(DRAIN_TIMEOUT));
+    let mut discarded = 0usize;
+    let mut chunk = [0u8; 8192];
+    while discarded < DRAIN_CAP_BYTES {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => discarded = discarded.saturating_add(n),
+        }
+    }
+}
 
 /// Read one HTTP/1.1 request: request line, headers, and `Content-Length` body.
 ///

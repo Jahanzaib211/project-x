@@ -101,6 +101,8 @@ Entry template:
   on the simulator alone, in its own database.
 
 ### Fixed
+- service-kit refused oversized bodies with a 413 the client never saw: the socket closed with unread bytes and the kernel reset it. The remainder is now drained (bounded) before the refusal is written.
+- The security gate's oversized-body probe had never run: a 200 KB shell argument is over the kernel's single-argument limit. It sends from a file now, and the absurd-volume probe accepts a *recorded* rejection (201, `REJECTED`, no deal) rather than demanding a 4xx.
 
 - **`05-position`, `09-risk`** — A residual position below the venue minimum
   could never be closed; a close of the whole residual now bypasses the
