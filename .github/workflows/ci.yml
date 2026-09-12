@@ -327,8 +327,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          repo="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
-          make images-push IMAGE_OWNER="$owner" IMAGE_REPO="$repo" IMAGE_TAG="${GITHUB_SHA::7}"
+          make images-push IMAGE_OWNER="$owner" IMAGE_TAG="${GITHUB_SHA::7}"
 
   # ---------------------------------------------------------------------------
   # Single required status for branch protection.

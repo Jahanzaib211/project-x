@@ -82,15 +82,16 @@ build: ## Build all service images
 # -----------------------------------------------------------------------------
 # `images` rebuilds every deployed service image from scratch — no layer
 # cache, base images re-pulled — which is what "fresh" means. `images-push`
-# tags them ghcr.io/<owner>/project-x/<svc> and pushes; it needs a registry
+# tags them ghcr.io/<owner>/projectx/<svc> and pushes; it needs a registry
 # login (`gh auth token | docker login ghcr.io -u <user> --password-stdin`).
 #
-# The repository-scoped name is deliberate: a package first created by a
-# push from the repository's own Actions token is linked to the repository
-# and inherits its visibility — public, here — whereas one first pushed by a
-# person is private and unlinked, and can only be changed in the GitHub UI.
+# A package first created by a push from the repository's own Actions token
+# is linked to the repository and inherits its visibility — public, here —
+# whereas one first pushed by a person is private and unlinked, and only the
+# GitHub UI can change that. So a *new* image name must first be pushed by
+# CI (merge to main), never by hand; pushing by hand is fine afterwards.
 IMAGE_OWNER ?= jahanzaib211
-IMAGE_REPO  ?= project-x
+IMAGE_REPO  ?= projectx
 IMAGE_TAG   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IMAGES      := ledger market-data pricing oms feed-gateway mt5-sim client-api web ops
 

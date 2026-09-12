@@ -86,7 +86,7 @@ that login's quotes, mirrors the core's fills and is reconciled against the
 ledger continuously — the platform is never the source of truth.
 
 **Images.** Every push to `main` publishes the deployed images to
-`ghcr.io/jahanzaib211/project-x/<service>:{sha,latest}` (ledger, market-data,
+`ghcr.io/jahanzaib211/projectx/<service>:{sha,latest}` (ledger, market-data,
 pricing, oms, feed-gateway, mt5-sim, client-api, web, ops); `make images`
 rebuilds them from scratch locally and `make images-push` publishes by hand.
 
