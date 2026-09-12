@@ -18,6 +18,21 @@ import { klineToTicks, parseBookTicker } from "./binance.js";
 import { parseTradeMessage } from "./finnhub.js";
 import { Mt5Adapter, parseTickLine } from "./mt5.js";
 import { SimAdapter } from "./sim.js";
+
+/**
+ * Poll until `ready()` holds. Fixed sleeps are a bet on the runner's speed;
+ * a condition is what the test actually means. Three seconds is the cap,
+ * generous for a loaded CI box and irrelevant when things are quick.
+ * @param {() => boolean} ready
+ * @param {string} what
+ */
+async function until(ready, what) {
+  const deadline = Date.now() + 3000;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 import { parsePriceEvent } from "./twelvedata.js";
 import { carried, toCanonical, toProvider } from "../symbols.js";
 
@@ -144,7 +159,7 @@ test("the simulator honours the contract: canonical ticks, fresh health, determi
   const again = [];
   a.start(["EURUSD", "BTCUSD"], (t) => got.push(t));
   b.start(["EURUSD", "BTCUSD"], (t) => again.push(t));
-  await new Promise((r) => setTimeout(r, 60));
+  await until(() => got.length >= 8 && again.length >= 8, "eight ticks from each simulator");
   a.stop();
   b.stop();
   assert.ok(got.length >= 8, `only ${got.length} ticks`);
@@ -163,7 +178,13 @@ test("the simulator's faults are real: duplicates, reordering, crossed quotes, a
   /** @type {import("./base.js").Tick[]} */
   const got = [];
   sim.start(["EURUSD"], (t) => got.push(t));
-  await new Promise((r) => setTimeout(r, 120));
+  await until(() => {
+    const seqs = got.map((t) => t.seq);
+    return new Set(seqs).size < seqs.length
+      && seqs.some((s, i) => i > 0 && s < (seqs[i - 1] ?? 0))
+      && got.some((t) => Number(t.bid) > Number(t.ask))
+      && sim.errors >= 1;
+  }, "every injected fault to show");
   const seqs = got.map((t) => t.seq);
   assert.ok(new Set(seqs).size < seqs.length, "a duplicate was emitted");
   assert.ok(seqs.some((s, i) => i > 0 && s < (seqs[i - 1] ?? 0)), "an out-of-order tick was emitted");
@@ -197,8 +218,7 @@ test("the mt5 adapter consumes a bridge event stream and reconnects when it ends
   /** @type {import("./base.js").Tick[]} */
   const got = [];
   adapter.start(["EURUSD", "XAUUSD"], (t) => got.push(t));
-  await new Promise((r) => setTimeout(r, 80));
-  assert.equal(got.length, 1);
+  await until(() => got.length >= 1 && adapter.errors >= 1, "a tick and the stream's end");
   assert.equal(got[0]?.bid, "1.08500");
   assert.ok(["disconnected", "connecting", "connected"].includes(adapter.state));
   assert.ok(adapter.errors >= 1, "the ended stream counted as a failure");
@@ -246,7 +266,8 @@ test("a simulated bridge is not a price source unless explicitly allowed", async
   /** @type {import("./base.js").Tick[]} */
   const none = [];
   refused.start(["EURUSD"], (t) => none.push(t));
-  await new Promise((r) => setTimeout(r, 60));
+  await until(() => refused.state === "unconfigured", "the simulated bridge to be refused");
+  await new Promise((r) => setTimeout(r, 20));
   assert.equal(refused.state, "unconfigured");
   assert.equal(none.length, 0);
   refused.stop();
@@ -256,8 +277,8 @@ test("a simulated bridge is not a price source unless explicitly allowed", async
   /** @type {import("./base.js").Tick[]} */
   const got = [];
   allowed.start(["EURUSD"], (t) => got.push(t));
-  await new Promise((r) => setTimeout(r, 80));
-  assert.equal(got.length, 1);
+  await until(() => got.length >= 1, "a tick from the allowed simulated bridge");
+  assert.equal(got[0]?.bid, "1.08500");
   allowed.stop();
   delete process.env.MT5_ALLOW_SIMULATED;
   server.close();
