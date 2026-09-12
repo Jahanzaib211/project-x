@@ -50,12 +50,17 @@ invariant it does not test.
 - INV-030: available balance == balance - reservations - used margin; never negative without an explicit deficit event.
 - INV-031: no balance mutation exists without a corresponding ledger transaction.
 - INV-032: a frozen or closed account cannot originate new financial effects.
+- INV-033: an account number identifies exactly one ledger account and one client-area record; the ledger issues every number.
+- INV-034: demo capital is issued only to an active demo account, idempotently per request, and never past the demo cap.
+- INV-035: a demo reset is a correction back to the opening grant, made only while the account is flat.
 
 ## Test obligations
 
 - deposit, withdrawal reservation, release, fee, adjustment
 - freeze and close blocks every mutating path
 - reservation double-release is idempotent
+- an account opened in either mode exists in the ledger and the client area under one number
+- a retried demo credit posts once; a real account is refused; the cap holds exactly
 
 ## Known failure modes
 

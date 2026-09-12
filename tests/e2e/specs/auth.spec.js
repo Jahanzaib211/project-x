@@ -24,7 +24,7 @@
 
 import { createHmac } from "node:crypto";
 
-import { test, expect, API } from "../fixtures.js";
+import { test, expect, API, SYMBOL } from "../fixtures.js";
 
 /** A fresh address per registration. */
 let sequence = 0;
@@ -802,9 +802,11 @@ test.describe("the whole journey", () => {
     await expect(page.locator(".balance-chip")).toContainText(/unavailable/i);
 
     // ---- open a demo trading account ----
-    await page.goto("/terminal");
+    await page.goto(`/terminal?symbol=${SYMBOL}`);
     await page.locator("[data-open-demo]").click();
     await expect(page.locator("[data-balance]")).toHaveText("10000.00", { timeout: 20_000 });
+    // The reload after opening lands on the same symbol.
+    await expect(page.locator("[data-terminal]")).toHaveAttribute("data-symbol", SYMBOL);
 
     // The terminal carries the account it is showing on its root element; there
     // is no separate label to read it from.
@@ -819,14 +821,14 @@ test.describe("the whole journey", () => {
     // ledger settled it, and the blotter is showing what came back.
     // `data-positions` is the tbody itself, so the rows are its direct children.
     await expect(page.locator("[data-positions] tr").first()).toBeVisible({ timeout: 20_000 });
-    await expect(page.locator("[data-positions]")).toContainText("EURUSD");
+    await expect(page.locator("[data-positions]")).toContainText(SYMBOL);
 
     // The balance moved by the commission, and the equity tracks the mark.
     await expect(page.locator("[data-balance]")).not.toHaveText("10000.00");
 
     const afterTrade = await coreValuation(request, account);
     expect(afterTrade.positions).toHaveLength(1);
-    expect(afterTrade.positions[0].symbol).toBe("EURUSD");
+    expect(afterTrade.positions[0].symbol).toBe(SYMBOL);
 
     // ---- sign out ----
     await page.goto("/signout");
@@ -843,8 +845,8 @@ test.describe("the whole journey", () => {
 
     // The position survived, because it lives in the ledger rather than in a
     // session. And the figure shown is the one the core computes now.
-    await page.goto(`/terminal?account=${account}`);
-    await expect(page.locator("[data-positions]")).toContainText("EURUSD", { timeout: 20_000 });
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
+    await expect(page.locator("[data-positions]")).toContainText(SYMBOL, { timeout: 20_000 });
 
     const afterSignIn = await coreValuation(request, account);
     expect(afterSignIn.balance).toBe(afterTrade.balance);

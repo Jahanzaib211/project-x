@@ -29,11 +29,19 @@ PORT_LEDGER="$(port PORT_LEDGER)";           PORT_LEDGER="${PORT_LEDGER:-27002}"
 PORT_MD="$(port PORT_MARKET_DATA)";          PORT_MD="${PORT_MD:-27003}"
 PORT_PRICING="$(port PORT_PRICING)";         PORT_PRICING="${PORT_PRICING:-27004}"
 PORT_OMS="$(port PORT_OMS)";                 PORT_OMS="${PORT_OMS:-27005}"
+PORT_FEED="$(port PORT_FEED_GATEWAY)";       PORT_FEED="${PORT_FEED:-27021}"
+PORT_MT5SIM="$(port PORT_MT5_SIM)";          PORT_MT5SIM="${PORT_MT5SIM:-27022}"
 PORT_PG="$(port PORT_POSTGRES)";             PORT_PG="${PORT_PG:-27007}"
+FEED_LOG="${FEED_LOG_PATH:-$RUN_DIR/feed.log}"
 
 PG_USER="$(port POSTGRES_USER)";             PG_USER="${PG_USER:-projectx}"
 PG_PASSWORD="$(port POSTGRES_PASSWORD)";     PG_PASSWORD="${PG_PASSWORD:-dev_only_not_a_real_password}"
-PG_DB="$(port POSTGRES_DB)";                 PG_DB="${PG_DB:-projectx}"
+# Its own database, in the same Postgres. The composed stack's data belongs to
+# the composed stack: the ledger issues every account number (INV-033) and the
+# client API reconciles its records to the ledger it is pointed at, so a
+# tree-run stack with a fresh journal must not be pointed at the deployment's
+# rows — it would re-key them, correctly, into the wrong ledger.
+PG_DB="${PROJECTX_LOCAL_DB:-projectx_local}"
 
 start_one() {
   local name="$1"; shift
@@ -49,7 +57,7 @@ wait_healthy() {
   local name="$1" url="$2" tries=0
   until curl -fsS -m 1 "$url" >/dev/null 2>&1; do
     tries=$((tries + 1))
-    if [ "$tries" -gt 100 ]; then
+    if [ "$tries" -gt 300 ]; then
       echo "  ✗ $name never became healthy at $url"
       sed 's/^/      /' "$RUN_DIR/$name.log" | tail -20
       return 1
@@ -101,21 +109,40 @@ case "${1:-start}" in
 
     echo "making sure the datastores are up…"
     docker compose --profile infra up -d >/dev/null 2>&1
+    docker exec projectx-postgres psql -U "$PG_USER" -d postgres -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$PG_DB'" 2>/dev/null | grep -q 1 \
+      || docker exec projectx-postgres psql -U "$PG_USER" -d postgres -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1
+    if [ "${FRESH_DB:-false}" = "true" ]; then
+      # From genesis on both sides: the journal is removed by the caller, the
+      # client area here.
+      docker exec projectx-postgres psql -U "$PG_USER" -d "$PG_DB" -c "DROP SCHEMA IF EXISTS app CASCADE" >/dev/null 2>&1
+    fi
 
     # The compose copies of these services hold the same ports. Ours is the one
     # built from this tree, so theirs step aside.
     echo "stopping the compose copies of the app services…"
-    docker compose stop ledger market-data pricing oms client-api web >/dev/null 2>&1
+    docker compose stop ledger market-data pricing oms client-api web feed-gateway mt5-sim >/dev/null 2>&1
 
     "$0" stop >/dev/null 2>&1
 
     echo "starting services from this tree…"
     start_one market-data env PORT="$PORT_MD" SERVICE_NAME=market-data \
-      ./target/release/market_data
+      FEED_LOG_PATH="$FEED_LOG" ./target/release/market_data
     start_one pricing env PORT="$PORT_PRICING" SERVICE_NAME=pricing \
-      ./target/release/pricing
+      MARKET_DATA_URL="http://127.0.0.1:$PORT_MD" ./target/release/pricing
     start_one ledger env PORT="$PORT_LEDGER" SERVICE_NAME=ledger \
-      LEDGER_JOURNAL_PATH="$JOURNAL" ./target/release/ledger
+      LEDGER_JOURNAL_PATH="$JOURNAL" MARKET_DATA_URL="http://127.0.0.1:$PORT_MD" \
+      ./target/release/ledger
+    # The simulated MT5 bridge and the feed gateway. The suite may price on
+    # the simulator (MT5_ALLOW_SIMULATED=1): that is the recorded-feed path,
+    # end to end, with prices nobody mistakes for a market.
+    start_one mt5-sim env PORT="$PORT_MT5SIM" node services/mt5-sim/src/server.js
+    start_one feed-gateway env PORT="$PORT_FEED" \
+      MARKET_DATA_URL="http://127.0.0.1:$PORT_MD" \
+      MT5_BRIDGE_URL="http://127.0.0.1:$PORT_MT5SIM" \
+      MT5_ALLOW_SIMULATED="${MT5_ALLOW_SIMULATED:-1}" \
+      FEED_ADAPTERS="${FEED_ADAPTERS:-mt5}" \
+      node services/feed-gateway/src/server.js
     start_one oms env PORT="$PORT_OMS" SERVICE_NAME=oms RISK_FAIL_MODE=closed \
       LEDGER_URL="http://127.0.0.1:$PORT_LEDGER" ./target/release/oms
     # The gate suite issues several hundred requests a minute from this one
@@ -138,6 +165,8 @@ case "${1:-start}" in
       OMS_URL="http://127.0.0.1:$PORT_OMS" \
       PRICING_URL="http://127.0.0.1:$PORT_PRICING" \
       MARKET_DATA_URL="http://127.0.0.1:$PORT_MD" \
+      FEED_GATEWAY_URL="http://127.0.0.1:$PORT_FEED" \
+      MT5_BRIDGE_URL="http://127.0.0.1:$PORT_MT5SIM" \
       node services/client-api/src/server.js
     start_one web env PORT="$PORT_WEB" \
       API_INTERNAL_URL="http://127.0.0.1:$PORT_API" \
@@ -148,6 +177,8 @@ case "${1:-start}" in
     wait_healthy pricing     "http://127.0.0.1:$PORT_PRICING/health" || exit 1
     wait_healthy ledger      "http://127.0.0.1:$PORT_LEDGER/health" || exit 1
     wait_healthy oms         "http://127.0.0.1:$PORT_OMS/health" || exit 1
+    wait_healthy mt5-sim     "http://127.0.0.1:$PORT_MT5SIM/health" || exit 1
+    wait_healthy feed-gateway "http://127.0.0.1:$PORT_FEED/health" || exit 1
     wait_healthy client-api  "http://127.0.0.1:$PORT_API/health" || exit 1
     wait_healthy web         "http://127.0.0.1:$PORT_WEB/api/health" || exit 1
     echo
@@ -162,13 +193,14 @@ case "${1:-start}" in
     # service restarted by hand. Matched on the *command* as well as the port:
     # this script must never kill something else that happens to be listening
     # there, which is the same rule scripts/check_ports.sh enforces on the way in.
-    for reserved in "$PORT_WEB" "$PORT_API" "$PORT_LEDGER" "$PORT_MD" "$PORT_PRICING" "$PORT_OMS"; do
+    for reserved in "$PORT_WEB" "$PORT_API" "$PORT_LEDGER" "$PORT_MD" "$PORT_PRICING" "$PORT_OMS" "$PORT_FEED" "$PORT_MT5SIM"; do
       while read -r holder; do
         [ -n "$holder" ] || continue
         command_line="$(tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null)"
         case "$command_line" in
           *target/release/ledger*|*target/release/market_data*|\
           *target/release/pricing*|*target/release/oms*|\
+          *services/feed-gateway/src/server.js*|*services/mt5-sim/src/server.js*|\
           *services/client-api/src/server.js*|*apps/web/src/server.js*)
             kill -TERM "$holder" 2>/dev/null && echo "  reaped stale listener on $reserved (pid $holder)"
             ;;
@@ -192,7 +224,7 @@ case "${1:-start}" in
     ;;
 
   status)
-    for name in market-data pricing ledger oms client-api web; do
+    for name in market-data pricing ledger oms mt5-sim feed-gateway client-api web; do
       pidfile="$RUN_DIR/$name.pid"
       if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "  ✓ $name (pid $(cat "$pidfile"))"

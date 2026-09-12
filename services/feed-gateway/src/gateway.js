@@ -47,6 +47,35 @@ export const BACKFILL_MS = 24 * 3_600_000;
  * @property {typeof fetch} [fetch]
  */
 
+/**
+ * The adapters this process runs.
+ *
+ * `FEED_ADAPTERS` names them (comma-separated); unset means every real
+ * provider. A test stack sets it to `mt5` so nothing reaches the internet and
+ * every price is the simulator's deterministic walk. `sim-lp` is only ever
+ * present when asked for.
+ */
+function defaultAdapters() {
+  /** @type {Record<string, () => import("./adapters/base.js").Adapter>} */
+  const available = {
+    binance: () => new BinanceAdapter(),
+    twelvedata: () => new TwelveDataAdapter(),
+    finnhub: () => new FinnhubAdapter(),
+    mt5: () => new Mt5Adapter(),
+    "sim-lp": () => new SimAdapter(),
+  };
+  const wanted = (process.env.FEED_ADAPTERS ?? "binance,twelvedata,finnhub,mt5")
+    .split(",").map((s) => s.trim()).filter((s) => s in available);
+  if (process.env.SIM_LP === "1" && !wanted.includes("sim-lp")) wanted.push("sim-lp");
+  /** @type {Record<string, import("./adapters/base.js").Adapter>} */
+  const adapters = {};
+  for (const name of wanted) {
+    const make = available[name];
+    if (make) adapters[name] = make();
+  }
+  return adapters;
+}
+
 /** The instruments per class, mirroring market-core's table. */
 export const CLASSES = {
   "FX major": ["EURUSD", "GBPUSD", "AUDUSD"],
@@ -62,13 +91,7 @@ export class Gateway {
     this.log = options.log ?? (() => {});
     this.fetch = options.fetch ?? fetch;
     /** @type {Record<string, import("./adapters/base.js").Adapter>} */
-    this.adapters = options.adapters ?? {
-      binance: new BinanceAdapter(),
-      twelvedata: new TwelveDataAdapter(),
-      finnhub: new FinnhubAdapter(),
-      mt5: new Mt5Adapter(),
-      ...(process.env.SIM_LP === "1" ? { "sim-lp": new SimAdapter() } : {}),
-    };
+    this.adapters = options.adapters ?? defaultAdapters();
     /** @type {Record<string, string[]>} class → sources */
     this.config = {};
     /** @type {Map<string, string>} symbol → selected source */

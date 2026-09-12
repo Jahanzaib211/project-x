@@ -861,7 +861,10 @@ const server = http.createServer(async (req, res) => {
         callApi("/v1/instruments", {}, token),
         callApi("/v1/trading-accounts", {}, token),
       ]);
-      const accounts = tradingAccounts.ok ? tradingAccounts.body.accounts : [];
+      // Only accounts that can trade. A frozen (archived) account has no
+      // business in the ticket's picker; it is restored from the accounts page.
+      const accounts = (tradingAccounts.ok ? tradingAccounts.body.accounts : [])
+        .filter((/** @type {{status: string}} */ a) => a.status === "active");
       const chosen = url.searchParams.get("account") ?? accounts[0]?.accountNumber ?? "";
 
       // A second round trip only where there is an account to describe.

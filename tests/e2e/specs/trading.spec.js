@@ -6,7 +6,7 @@
  * position — with the ledger balancing at every step.
  */
 
-import { test, expect, coreState, ledgerInvariants } from "../fixtures.js";
+import { test, expect, coreState, ledgerInvariants, SYMBOL, instrument, commissionMinor, usd } from "../fixtures.js";
 
 /** The figure shown when the core has no value to report (INV-183). */
 const ABSENT = "—";
@@ -16,7 +16,7 @@ test.describe("placing and closing a trade", () => {
     page,
     demoAccount,
   }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
 
     await expect(page.locator("[data-balance]")).toHaveText("10000.00");
     await expect(page.locator("[data-equity]")).toHaveText("10000.00");
@@ -34,18 +34,18 @@ test.describe("placing and closing a trade", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await expect(page.locator("[data-balance]")).toHaveText("10000.00");
 
     await page.locator("[data-volume]").fill("0.10");
     await page.locator("[data-buy]").click();
 
     // The ticket reports what the core said.
-    await expect(page.locator("[data-ticket-note]")).toContainText(/BUY 0\.10 EURUSD/);
+    await expect(page.locator("[data-ticket-note]")).toContainText(new RegExp(`BUY 0\\.10 ${SYMBOL}`));
     await expect(page.locator("[data-ticket-note]")).toHaveAttribute("data-tone", "ok");
 
     // A position appears, on the right side, for the right size.
-    const position = page.locator('[data-position="EURUSD"]');
+    const position = page.locator(`[data-position="${SYMBOL}"]`);
     await expect(position).toBeVisible();
     await expect(position.locator(".badge")).toHaveText("BUY");
     await expect(position).toContainText("0.100");
@@ -56,7 +56,9 @@ test.describe("placing and closing a trade", () => {
 
     // Commission came out of the balance. The page did not compute that — the
     // ledger did, and the page is showing what the ledger said.
-    await expect(page.locator("[data-balance]")).toHaveText("9999.65");
+    const inst = await instrument(request, SYMBOL);
+    const afterCommission = usd(1_000_000 - commissionMinor(inst, "0.10"));
+    await expect(page.locator("[data-balance]")).toHaveText(afterCommission);
 
     // Margin is now in use, so a margin level exists where it did not before.
     await expect(page.locator("[data-used-margin]")).not.toHaveText("0.00");
@@ -64,19 +66,19 @@ test.describe("placing and closing a trade", () => {
 
     // And the core agrees with the screen.
     const state = await coreState(request, account);
-    expect(state.balance).toBe("9999.65");
+    expect(state.balance).toBe(afterCommission);
     expect(state.positions).toHaveLength(1);
-    expect(state.positions[0].symbol).toBe("EURUSD");
+    expect(state.positions[0].symbol).toBe(SYMBOL);
     expect(state.positions[0].side).toBe("BUY");
     expect(state.positions[0].volume).toBe("0.100");
   });
 
   test("unrealised P&L moves with the market", async ({ page, demoAccount }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.50");
     await page.locator("[data-buy]").click();
 
-    const pnl = page.locator('[data-position="EURUSD"] [data-position-pnl]');
+    const pnl = page.locator(`[data-position="${SYMBOL}"] [data-position-pnl]`);
     await expect(pnl).toBeVisible();
     const first = await pnl.textContent();
 
@@ -99,12 +101,12 @@ test.describe("placing and closing a trade", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.10");
     await page.locator("[data-buy]").click();
-    await expect(page.locator('[data-position="EURUSD"]')).toBeVisible();
+    await expect(page.locator(`[data-position="${SYMBOL}"]`)).toBeVisible();
 
-    await page.locator('[data-close-position="EURUSD"]').click();
+    await page.locator(`[data-close-position="${SYMBOL}"]`).click();
 
     // Flat again: no position, no margin, and no margin level (INV-043).
     await expect(page.locator("[data-positions-empty]")).toBeVisible();
@@ -126,15 +128,15 @@ test.describe("placing and closing a trade", () => {
   });
 
   test("the ledger balances after every trade", async ({ page, request, demoAccount }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
 
     for (const volume of ["0.10", "0.25", "1.00"]) {
       await page.locator("[data-volume]").fill(volume);
       await page.locator("[data-buy]").click();
       await expect(page.locator("[data-ticket-note]")).toHaveAttribute("data-tone", "ok");
     }
-    await expect(page.locator('[data-position="EURUSD"]')).toBeVisible();
-    await page.locator('[data-close-position="EURUSD"]').click();
+    await expect(page.locator(`[data-position="${SYMBOL}"]`)).toBeVisible();
+    await page.locator(`[data-close-position="${SYMBOL}"]`).click();
     await expect(page.locator("[data-positions-empty]")).toBeVisible();
 
     // INV-020 and INV-023, asked of the ledger itself rather than inferred.
@@ -150,11 +152,11 @@ test.describe("placing and closing a trade", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.20");
     await page.locator("[data-sell]").click();
 
-    const position = page.locator('[data-position="EURUSD"]');
+    const position = page.locator(`[data-position="${SYMBOL}"]`);
     await expect(position.locator(".badge")).toHaveText("SELL");
 
     const state = await coreState(request, account);

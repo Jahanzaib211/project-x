@@ -34,7 +34,13 @@ RUN dpkg --add-architecture i386 \
  && curl -fsSL https://dl.winehq.org/wine-builds/winehq.key -o /etc/apt/keyrings/winehq-archive.key \
  && curl -fsSL https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources -o /etc/apt/sources.list.d/winehq-noble.sources \
  && apt-get update \
- && apt-get install -y --no-install-recommends winehq-stable \
+ # Wine 10.0, pinned. Under Wine 11 the MetaQuotes installer's anti-tamper
+ # check reports "a debugger has been found" and never installs; under 10.0
+ # it installs in about a minute. The pin is the difference between an image
+ # that works and one that hangs.
+ && apt-get install -y --no-install-recommends \
+      winehq-stable=10.0.0.0~noble-1 wine-stable=10.0.0.0~noble-1 \
+      wine-stable-amd64=10.0.0.0~noble-1 wine-stable-i386:i386=10.0.0.0~noble-1 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 10001 app
@@ -50,11 +56,17 @@ RUN wineboot --init && wineserver -w \
  && rm /tmp/python.exe \
  && xvfb-run -a wine 'C:\Python311\python.exe' -m pip install --no-cache-dir --disable-pip-version-check MetaTrader5
 
-# The terminal. `/auto` installs silently into Program Files inside the prefix.
+# The terminal. `/auto` downloads and installs silently into Program Files
+# inside the prefix; the installer then lingers on an advertisement, so the
+# build waits for terminal64.exe to exist rather than for the installer to end.
 RUN curl -fsSL https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -o /tmp/mt5setup.exe \
- && (xvfb-run -a wine /tmp/mt5setup.exe /auto || true) \
+ && (xvfb-run -a wine /tmp/mt5setup.exe /auto >/tmp/mt5setup.log 2>&1 &) \
+ && for i in $(seq 1 60); do \
+      [ -f "/home/app/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe" ] && break; sleep 5; \
+    done \
+ && sleep 10 && wineserver -k || true \
  && rm -f /tmp/mt5setup.exe \
- && ls "/home/app/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+ && ls -la "/home/app/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
 WORKDIR /app
 COPY --chown=app:app bridge.py entrypoint.sh ./

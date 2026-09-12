@@ -230,8 +230,8 @@ test: ## G2 — unit tests (Rust + JavaScript)
 	@./scripts/check_frontend.sh --tests
 
 .PHONY: test-property
-test-property: ## G3 — property-based tests
-	@cargo test --workspace --features proptest -- --include-ignored 2>/dev/null || echo "  (pending)"
+test-property: ## G3 — property-based tests (tests/invariants: seeded generators, reproducible failures)
+	@cargo test -p invariants
 
 .PHONY: test-invariants
 test-invariants: ## G4 — the financial laws

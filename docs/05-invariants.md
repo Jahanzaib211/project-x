@@ -89,6 +89,9 @@ _Gated at G4. Tier T0._
 - **INV-030** — available balance == balance - reservations - used margin; never negative without an explicit deficit event.
 - **INV-031** — no balance mutation exists without a corresponding ledger transaction.
 - **INV-032** — a frozen or closed account cannot originate new financial effects.
+- **INV-033** — an account number identifies exactly one ledger account and one client-area record; the ledger issues every number.
+- **INV-034** — demo capital is issued only to an active demo account, idempotently per request, and never past the demo cap.
+- **INV-035** — a demo reset is a correction back to the opening grant, made only while the account is flat.
 
 ### `05-position` — Position Engine
 
@@ -106,6 +109,8 @@ _Gated at G4. Tier T1._
 - **INV-050** — a quote that fails validation never reaches the canonical book.
 - **INV-051** — market state carries an explicit freshness age; consumers must be able to reject stale state.
 - **INV-052** — the canonical book is reproducible from the recorded feed.
+- **INV-053** — outside its trading session an instrument produces no new price; its quote is frozen at the last open tick and says so.
+- **INV-054** — the recorded feed rebuilt from its log is identical to the one that wrote it, digest for digest.
 
 ### `07-pricing` — Pricing Engine
 
@@ -133,6 +138,7 @@ _Gated at G4. Tier T0._
 - **INV-081** — every decision records the exact input snapshot and policy version that produced it.
 - **INV-082** — no order reaches execution without a recorded risk decision.
 - **INV-083** — risk failure is closed, not open — an unavailable risk engine rejects, never allows.
+- **INV-084** — an order on an instrument whose trading session is closed is refused before price or margin is considered; nothing fills at a frozen price.
 
 ### `10-oms` — Order Management System
 
@@ -165,8 +171,8 @@ _Gated at G4. Tier T1._
 _Gated at G4. Tier T1._
 
 - **INV-120** — the core depends only on the LP interface, never on a vendor dialect.
-- **INV-121** — FIX sequence gaps are detected and resolved, never skipped.
-- **INV-122** — an LP execution report is applied exactly once.
+- **INV-121** — a failing provider is isolated behind its own circuit breaker and skipped in selection; an out-of-order or duplicate delivery is detected and recorded, never silently skipped.
+- **INV-122** — an LP execution report — a tick, a deal — is applied exactly once.
 
 ### `14-hedging` — Routing and Hedging
 

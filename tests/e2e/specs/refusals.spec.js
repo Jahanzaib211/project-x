@@ -6,7 +6,7 @@
  * and nothing was booked.
  */
 
-import { test, expect, coreState } from "../fixtures.js";
+import { test, expect, coreState, SYMBOL, instrument, commissionMinor, usd } from "../fixtures.js";
 
 test.describe("orders that are refused", () => {
   test("an order beyond the account's margin is refused with the reason", async ({
@@ -15,12 +15,15 @@ test.describe("orders that are refused", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await expect(page.locator("[data-balance]")).toHaveText("10000.00");
 
-    // 49 lots is inside the venue's size limit but needs about 10 633 of
-    // margin, which a 10 000 account does not have.
-    await page.locator("[data-volume]").fill("49.00");
+    // The venue's largest single order — inside the size limit, so the size
+    // check passes, and far beyond what 10 000 of demo capital can margin at
+    // any leverage the venue allows. (EURUSD: 50 lots; BTCUSD: 5 lots.)
+    const inst = await instrument(request, SYMBOL);
+    const maxLots = `${Math.floor(inst.maxVolumeMilliLots / 1000)}.00`;
+    await page.locator("[data-volume]").fill(maxLots);
     await page.locator("[data-buy]").click();
 
     const note = page.locator("[data-ticket-note]");
@@ -39,7 +42,7 @@ test.describe("orders that are refused", () => {
     page,
     demoAccount,
   }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("500.00");
     await page.locator("[data-buy]").click();
 
@@ -50,7 +53,7 @@ test.describe("orders that are refused", () => {
   });
 
   test("an order below the minimum size is refused", async ({ page, demoAccount }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.005");
     await page.locator("[data-buy]").click();
 
@@ -62,7 +65,7 @@ test.describe("orders that are refused", () => {
 
   test("a malformed volume never leaves the browser", async ({ page, request, demoAccount }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
 
     /** @type {string[]} */
     const posted = [];
@@ -91,12 +94,12 @@ test.describe("orders that are refused", () => {
     const account = demoAccount.accountNumber;
     const response = await request.post("http://127.0.0.1:27001/v1/positions/close", {
       headers: { "idempotency-key": `e2e-nothing-${Date.now()}` },
-      data: { account, symbol: "EURUSD" },
+      data: { account, symbol: SYMBOL },
     });
     expect(response.status()).toBe(422);
     expect(await response.text()).toContain("NOTHING_TO_CLOSE");
 
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await expect(page.locator("[data-balance]")).toHaveText("10000.00");
   });
 });
@@ -107,7 +110,7 @@ test.describe("retries", () => {
     const idempotencyKey = `e2e-retry-${Date.now()}`;
     const order = {
       account,
-      symbol: "EURUSD",
+      symbol: SYMBOL,
       side: "BUY",
       volume: "0.10",
     };
@@ -129,7 +132,9 @@ test.describe("retries", () => {
     const state = await coreState(request, account);
     expect(state.positions).toHaveLength(1);
     expect(state.positions[0].volume).toBe("0.100");
-    expect(state.balance).toBe("9999.65");
+    // One commission, not two: the retry was the same order.
+    const inst = await instrument(request, SYMBOL);
+    expect(state.balance).toBe(usd(1_000_000 - commissionMinor(inst, "0.10")));
 
     const orders = await request.get(`http://127.0.0.1:27001/v1/orders?account=${account}`);
     expect((await orders.json()).orders).toHaveLength(1);

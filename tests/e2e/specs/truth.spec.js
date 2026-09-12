@@ -8,7 +8,7 @@
  * rather than substituting a zero.
  */
 
-import { test, expect, coreState, API } from "../fixtures.js";
+import { test, expect, coreState, API, SYMBOL, instrument } from "../fixtures.js";
 
 const ABSENT = "—";
 
@@ -19,14 +19,14 @@ test.describe("the page owns no financial truth", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.30");
     await page.locator("[data-buy]").click();
-    await expect(page.locator('[data-position="EURUSD"]')).toBeVisible();
+    await expect(page.locator(`[data-position="${SYMBOL}"]`)).toBeVisible();
 
     // Close, so the account is static and the comparison is not a race against
     // the next tick.
-    await page.locator('[data-close-position="EURUSD"]').click();
+    await page.locator(`[data-close-position="${SYMBOL}"]`).click();
     await expect(page.locator("[data-positions-empty]")).toBeVisible();
 
     const state = await coreState(request, account);
@@ -44,7 +44,7 @@ test.describe("the page owns no financial truth", () => {
     demoAccount,
   }) => {
     const account = demoAccount.accountNumber;
-    await page.goto(`/terminal?account=${account}`);
+    await page.goto(`/terminal?account=${account}&symbol=${SYMBOL}`);
 
     // With nothing open, the core reports no margin level at all.
     const state = await coreState(request, account);
@@ -59,20 +59,23 @@ test.describe("the page owns no financial truth", () => {
     request,
     demoAccount,
   }) => {
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
     await page.locator("[data-volume]").fill("0.10");
     await page.locator("[data-buy]").click();
 
-    const row = page.locator('[data-position="EURUSD"]');
+    const row = page.locator(`[data-position="${SYMBOL}"]`);
     await expect(row).toBeVisible();
 
-    // Five decimal places for a major pair — not four, not the six a naive
-    // float format would produce.
-    const cells = await row.locator("td.mono").allTextContents();
-    const prices = cells.filter((text) => /^\d+\.\d+$/.test(text) && text.startsWith("1."));
-    expect(prices.length).toBeGreaterThan(0);
-    for (const price of prices) {
-      expect(price, `${price} is not quoted to five places`).toMatch(/^\d+\.\d{5}$/);
+    // Exactly the instrument's own digits — five for a major pair, two for
+    // gold or bitcoin — not four, not the six a naive float format would
+    // produce. The open and mark cells are the prices; volume has three
+    // places and is excluded by matching on the digits.
+    const inst = await instrument(request, SYMBOL);
+    const open = await row.locator("td.mono").nth(2).textContent();
+    const mark = await row.locator("[data-position-mark]").textContent();
+    const exact = new RegExp(`^\\d+\\.\\d{${inst.digits}}$`);
+    for (const price of [open, mark]) {
+      expect(price, `${price} is not quoted to ${inst.digits} places`).toMatch(exact);
     }
   });
 
@@ -106,7 +109,7 @@ test.describe("the page owns no financial truth", () => {
     // The page is server-rendered; the script is an upgrade, not a requirement.
     const context = await browser.newContext({ javaScriptEnabled: false });
     const page = await context.newPage();
-    await page.goto(`/terminal?account=${demoAccount.accountNumber}`);
+    await page.goto(`/terminal?account=${demoAccount.accountNumber}&symbol=${SYMBOL}`);
 
     await expect(page.locator("[data-terminal]")).toBeVisible();
     await expect(page.locator("[data-balance]")).toHaveText("10000.00");

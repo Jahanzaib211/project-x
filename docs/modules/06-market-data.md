@@ -38,6 +38,8 @@ Raw provider feeds turned into one canonical, validated, timestamped market stat
 - per-symbol staleness tracking and explicit stale marking
 - sequence-gap detection, resync and reconnect
 - market state snapshots for deterministic replay
+- trading-session calendar per instrument class (FX, metals, crypto, fixed holidays), pure in the tick
+- recorded feed store with an append-only log, per-symbol modes (synthetic or recorded-from-source) logged with the tick they took effect, and an operator-settable source order per class
 
 ## Invariants
 
@@ -47,6 +49,8 @@ invariant it does not test.
 - INV-050: a quote that fails validation never reaches the canonical book.
 - INV-051: market state carries an explicit freshness age; consumers must be able to reject stale state.
 - INV-052: the canonical book is reproducible from the recorded feed.
+- INV-053: outside its trading session an instrument produces no new price; its quote is frozen at the last open tick and says so.
+- INV-054: the recorded feed rebuilt from its log is identical to the one that wrote it, digest for digest.
 
 ## Test obligations
 

@@ -142,7 +142,7 @@ Dependency order. A module cannot start until everything it depends on is green.
 | 11 | [`10-oms`](docs/modules/10-oms.md) | T0 | Order Management System | `in-progress` | G0 G1 G2 G3 G4 G5 G6 G7 G8 G9 |
 | 12 | [`11-execution`](docs/modules/11-execution.md) | T0 | Execution Core | `in-progress` | G0 G1 G2 G3 G4 G5 G6 G7 G8 G9 |
 | 13 | [`12-risk-book`](docs/modules/12-risk-book.md) | T1 | Internal Risk Book | `planned` | G0 G1 G2 G3 G4 G5 G6 G7 G9 |
-| 14 | [`13-lp-connectivity`](docs/modules/13-lp-connectivity.md) | T1 | LP / FIX Connectivity | `planned` | G0 G1 G2 G3 G4 G5 G6 G7 G8 G9 |
+| 14 | [`13-lp-connectivity`](docs/modules/13-lp-connectivity.md) | T1 | LP / FIX Connectivity | `in-progress` | G0 G1 G2 G3 G4 G5 G6 G7 G8 G9 |
 | 15 | [`14-hedging`](docs/modules/14-hedging.md) | T1 | Routing and Hedging | `planned` | G0 G1 G2 G3 G4 G5 G6 G7 G9 |
 | 16 | [`15-reconciliation`](docs/modules/15-reconciliation.md) | T2 | Reconciliation | `planned` | G0 G1 G2 G3 G4 G5 G6 G7 G8 |
 | 17 | [`16-kyc-aml`](docs/modules/16-kyc-aml.md) | T3 | KYC / AML / Fraud | `planned` | G0 G1 G2 G3 G4 G5 G8 |
@@ -150,7 +150,7 @@ Dependency order. A module cannot start until everything it depends on is green.
 | 19 | [`18-compliance`](docs/modules/18-compliance.md) | T3 | Compliance and Reporting | `planned` | G0 G1 G2 G3 G4 G5 G8 |
 | 20 | [`19-client-api`](docs/modules/19-client-api.md) | T4 | Client API | `in-progress` | G0 G1 G2 G3 G4 G5 G8 G9 |
 | 21 | [`20-web`](docs/modules/20-web.md) | T4 | Web and Mobile | `in-progress` | G0 G1 G2 G4 G5 G8 |
-| 22 | [`21-external`](docs/modules/21-external.md) | T4 | External Platform Integrations (MT5 et al.) | `planned` | G0 G1 G2 G4 G5 G6 G8 |
+| 22 | [`21-external`](docs/modules/21-external.md) | T4 | External Platform Integrations (MT5 et al.) | `in-progress` | G0 G1 G2 G4 G5 G6 G8 |
 <!-- END:STATUS -->
 
 Source of truth: [`registry/modules.yaml`](registry/modules.yaml). Module pages

@@ -310,12 +310,21 @@ fi
 if curl -sf --max-time 3 "$API/health" >/dev/null 2>&1; then
   echo "  (live checks — API is up)"
 
+  # A session of this gate's own. The deployed configuration refuses anonymous
+  # requests (AUTH_REQUIRED=true), and the money rules must hold for a signed-in
+  # person just the same — so the checks below act as one rather than relying
+  # on the development identity that a deployment does not have.
+  gate_stamp="$(date +%s%N)"
+  gate_reg="$(curl -s --max-time 5 -X POST "$API/v1/auth/register" -H 'content-type: application/json'     -H "x-forwarded-for: ${GATE_ADDR:-10.99.0.1}"     -d "{\"name\":\"Inv Gate\",\"email\":\"inv-gate-$gate_stamp@example.test\",\"password\":\"a-properly-long-password\",\"acceptedTerms\":true}")"
+  gate_token="$(printf '%s' "$gate_reg" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  AS_GATE=(-H "authorization: Bearer $gate_token")
+
   # INV-183 is not "the balance is always null" — the ledger holds real demo
   # balances now, and a check that demanded null would fail the moment the
   # system started working. The rule is: a figure is either an exact decimal
   # string, or it is null *with a stated reason*. It is never a zero standing in
   # for something unknown.
-  wallet="$(curl -s --max-time 3 "$API/v1/wallet")"
+  wallet="$(curl -s --max-time 3 "${AS_GATE[@]}" "$API/v1/wallet")"
   if echo "$wallet" | grep -qE '"balance":"-?[0-9]+\.[0-9]+"'; then
     pass "INV-183 live: /v1/wallet reports a balance as an exact decimal string"
   elif echo "$wallet" | grep -q '"balance":null' && echo "$wallet" | grep -q 'unavailableReason'; then
@@ -326,7 +335,7 @@ if curl -sf --max-time 3 "$API/health" >/dev/null 2>&1; then
 
   # A mutating call without a key must be refused.
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST "$API/v1/accounts" \
-          -H 'content-type: application/json' -d '{}')"
+          "${AS_GATE[@]}" -H 'content-type: application/json' -d '{}')"
   if [ "$code" = "400" ]; then
     pass "INV-181 live: a mutating call without an idempotency key is refused"
   else
@@ -335,7 +344,7 @@ if curl -sf --max-time 3 "$API/health" >/dev/null 2>&1; then
 
   # Money as a JSON number must be refused.
   refusal="$(curl -s --max-time 3 -X POST "$API/v1/funding/deposit" \
-             -H 'content-type: application/json' -H 'idempotency-key: inv-check-0001' \
+             "${AS_GATE[@]}" -H 'content-type: application/json' -H 'idempotency-key: inv-check-0001' \
              -d '{"amount":250.5,"method":"card"}')"
   if echo "$refusal" | grep -q 'exact decimal string'; then
     pass "INV-001 live: money sent as a JSON number is refused"
@@ -398,11 +407,18 @@ if curl -sf --max-time 3 "$API/health" >/dev/null 2>&1; then
   reset_token="$(curl -s --max-time 5 "$API/v1/auth/outbox?to=$reset_email" 2>/dev/null \
     | grep -o 'reset-password?token=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)"
   if [ -z "$reset_token" ]; then
+    # Mailpit's search returns summaries, not bodies: find the message, then
+    # read it. The outbox worker drains every five seconds, so wait for it.
+    mailpit="${MAILPIT_URL:-http://127.0.0.1:27020}"
     for _ in 1 2 3 4 5 6 7 8; do
-      reset_token="$(curl -s --max-time 5 "${MAILPIT_URL:-http://127.0.0.1:27020}/api/v1/search?query=$reset_email" 2>/dev/null \
-        | grep -o 'reset-password?token=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)"
+      msg_id="$(curl -s --max-time 5 "$mailpit/api/v1/search?query=to:$reset_email" 2>/dev/null \
+        | grep -o '"ID":"[A-Za-z0-9]*"' | head -1 | cut -d'"' -f4)"
+      if [ -n "$msg_id" ]; then
+        reset_token="$(curl -s --max-time 5 "$mailpit/api/v1/message/$msg_id" 2>/dev/null \
+          | grep -o 'reset-password?token=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)"
+      fi
       [ -n "$reset_token" ] && break
-      curl -s -o /dev/null --max-time 6 "$API/health" || true
+      sleep 2
     done
   fi
 
@@ -477,11 +493,15 @@ if curl -sf --max-time 3 "$API/health" >/dev/null 2>&1; then
     else
       pass "INV-192 live: the token is absent from the web response body"
     fi
+    # Signed in as the person just registered — a deployment sends a signed-out
+    # visitor to /login. The shell must show either the ledger's exact figure or
+    # "Balance unavailable"; a fresh person has no account, so it is the latter.
+    html="$(curl -s --max-time 5 -b "$jar" "$WEB/")"
     rm -f "$jar"
-
-    html="$(curl -s --max-time 5 "$WEB/")"
     if echo "$html" | grep -q 'Balance unavailable'; then
       pass "INV-190 live: the page reports balances as unavailable"
+    elif echo "$html" | grep -qE 'data-wallet-balance>[0-9]+\.[0-9]{2} USD'; then
+      pass "INV-190 live: the page shows the ledger's exact balance string"
     else
       bad "INV-190 live: the page did not report an unavailable balance"
     fi

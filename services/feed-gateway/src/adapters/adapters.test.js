@@ -207,6 +207,30 @@ test("the mt5 adapter consumes a bridge event stream and reconnects when it ends
   assert.ok(connections >= 1);
 });
 
+test("the mt5 adapter backfills from the bridge's candles, four ticks per minute", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    if (String(req.url).startsWith("/v1/candles")) {
+      assert.match(String(req.url), /symbol=EURUSD&timeframe=M1&count=\d+/);
+      return res.end(JSON.stringify([
+        { ms: 1_789_000_000_000, open: "1.08500", high: "1.08600", low: "1.08400", close: "1.08550", volume: "0" },
+        { ms: 1_788_000_000_000, open: "1.0", high: "1.0", low: "1.0", close: "1.0", volume: "0" },
+      ]));
+    }
+    return res.end(JSON.stringify({ state: "connected", simulated: false }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(null)));
+  const address = /** @type {import("node:net").AddressInfo} */ (server.address());
+  process.env.MT5_BRIDGE_URL = `http://127.0.0.1:${address.port}`;
+  const adapter = new Mt5Adapter();
+  const ticks = await adapter.backfill("EURUSD", 1_788_500_000_000);
+  assert.equal(ticks.length, 4, "the candle before `since` is left out");
+  assert.deepEqual(ticks.map((t) => t.bid), ["1.08500", "1.08600", "1.08400", "1.08550"]);
+  assert.equal(ticks[3]?.ms, 1_789_000_059_999);
+  assert.deepEqual(await adapter.backfill("NOPE", 0), []);
+  server.close();
+});
+
 test("a simulated bridge is not a price source unless explicitly allowed", async () => {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { "content-type": String(req.url) === "/v1/state" ? "application/json" : "text/event-stream" });

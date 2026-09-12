@@ -55,4 +55,45 @@ export async function ledgerInvariants(request) {
   return await response.json();
 }
 
+/**
+ * The instrument's own facts, from the API: digits, commission, limits. The
+ * specs derive their expectations from these rather than hard-coding one
+ * instrument's numbers, because the instrument traded depends on which market
+ * is open when the suite runs.
+ * @param {import("@playwright/test").APIRequestContext} request
+ * @param {string} symbol
+ */
+export async function instrument(request, symbol) {
+  const response = await request.get(`${API}/v1/instruments`);
+  const body = await response.json();
+  const found = (body.instruments ?? []).find((/** @type {{symbol: string}} */ i) => i.symbol === symbol);
+  if (!found) throw new Error(`the API does not list ${symbol}`);
+  return found;
+}
+
+/**
+ * Commission for a volume in lots, as the ledger charges it: per lot, per
+ * side, rounded up to the cent. Integer arithmetic in the test — the page is
+ * what must not compute money, not the suite that checks it.
+ * @param {{commissionPerLotMinor: number}} inst
+ * @param {string} lots Decimal string with up to three places.
+ */
+export function commissionMinor(inst, lots) {
+  const [whole = "0", frac = ""] = lots.split(".");
+  const milli = Number(whole) * 1000 + Number((frac + "000").slice(0, 3));
+  return Math.ceil((inst.commissionPerLotMinor * milli) / 1000);
+}
+
+/** A USD amount in minor units as the decimal string the ledger renders. */
+export function usd(minor) {
+  const sign = minor < 0 ? "-" : "";
+  const abs = Math.abs(minor);
+  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
+}
+
+/** The instrument whose market is open for this run (chosen in global setup). */
+export const SYMBOL = process.env.E2E_SYMBOL ?? "EURUSD";
+/** An instrument whose market is closed right now, or "" if every market is open. */
+export const CLOSED_SYMBOL = process.env.E2E_CLOSED_SYMBOL ?? "";
+
 export { expect, API };

@@ -27,7 +27,7 @@ count_imbalances() {
 # ---------------------------------------------------------------------------
 # INV-024 — the ledger after crash recovery is identical to before the crash.
 # ---------------------------------------------------------------------------
-echo "  [1/3] kill -9 the database mid-flight, restart, compare the ledger"
+echo "  [1/4] kill -9 the database mid-flight, restart, compare the ledger"
 before="$(snapshot_ledger)"
 if [ -z "$before" ]; then
   echo "      SKIPPED — infrastructure is not running (make up-infra)"
@@ -51,7 +51,7 @@ fi
 # ---------------------------------------------------------------------------
 # INV-020 must hold after the fault, not merely before it.
 # ---------------------------------------------------------------------------
-echo "  [2/3] invariants after the fault"
+echo "  [2/4] invariants after the fault"
 imbalances="$(count_imbalances)"
 if [ "${imbalances:-0}" = "0" ]; then
   echo "      ✓ INV-020 debits == credits after recovery"
@@ -63,7 +63,7 @@ fi
 # ---------------------------------------------------------------------------
 # INV-014 / INV-104 — replay equivalence must survive the fault.
 # ---------------------------------------------------------------------------
-echo "  [3/3] replay equivalence after the fault"
+echo "  [3/4] replay equivalence after the fault"
 if command -v cargo >/dev/null 2>&1; then
   if cargo test -p invariants --test event_laws >/dev/null 2>&1; then
     echo "      ✓ replay determinism holds"
@@ -73,6 +73,43 @@ if command -v cargo >/dev/null 2>&1; then
   fi
 else
   echo "      SKIPPED — cargo unavailable"
+fi
+
+# ---------------------------------------------------------------------------
+# INV-054 — the recorded feed survives its service being killed mid-ingest.
+#
+# The gateway is pushing ticks the whole time. What is compared is not the
+# whole digest (new ticks arrive between the two reads, and a digest of
+# "everything ever accepted" moves with them) but what must not go backwards:
+# after a kill -9 and a restart the service replays its log, holds at least
+# every quote it had acknowledged before, and serves a quote again.
+# ---------------------------------------------------------------------------
+echo "  [4/4] kill -9 market-data mid-ingest, restart, check the recorded feed"
+MD="${MARKET_DATA:-http://127.0.0.1:27003}"
+feed_status() { curl -s --max-time 3 "$MD/v1/feed/status" 2>/dev/null; }
+before_recorded="$(feed_status | grep -o '"recorded":[0-9]*' | cut -d: -f2)"
+if [ -z "$before_recorded" ]; then
+  echo "      SKIPPED — market-data not reachable at $MD"
+else
+  docker compose kill -s SIGKILL market-data >/dev/null 2>&1
+  docker compose up -d market-data >/dev/null 2>&1
+  for _ in $(seq 1 60); do
+    curl -sf --max-time 1 "$MD/health" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  after_recorded="$(feed_status | grep -o '"recorded":[0-9]*' | cut -d: -f2)"
+  if [ -n "$after_recorded" ] && [ "$after_recorded" -ge "$before_recorded" ]; then
+    echo "      ✓ INV-054 the record replayed: $after_recorded quotes held (had $before_recorded before the kill)"
+  else
+    echo "      ✗ INV-054 VIOLATED — held ${after_recorded:-nothing} after recovery, had $before_recorded before"
+    fail=1
+  fi
+  if curl -sf --max-time 3 "$MD/v1/quote?symbol=BTCUSD" | grep -q '"bid":"'; then
+    echo "      ✓ quotes serve again after the restart"
+  else
+    echo "      ✗ no quote after the restart"
+    fail=1
+  fi
 fi
 
 echo

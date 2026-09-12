@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Tier** | T1 |
-| **Status** | `planned` |
+| **Status** | `in-progress` |
 | **Release approval** | manual |
 | **Required gates** | `G0` `G1` `G2` `G3` `G4` `G5` `G6` `G7` `G8` `G9` |
 
@@ -35,11 +35,12 @@ A vendor-neutral LiquidityProvider interface with per-LP adapters. The core neve
 
 ## What gets built
 
-- LiquidityProvider trait: connect, subscribe, send_order, cancel, receive_execution, heartbeat
-- per-LP adapters behind that one interface
-- FIX session management: sequence numbers, resend, gap fill, logon/logout
-- a simulated LP for CI that implements the full contract
-- LP health scoring and circuit breaking
+- one adapter interface: start, stop, health, backfill — every provider dialect translated to canonical ticks behind it
+- per-provider adapters: Binance (keyless, live book plus kline backfill), Twelve Data, Finnhub, the MT5 bridge over SSE
+- session management per adapter: reconnect with backoff, heartbeat, subscription, symbol mapping table
+- a simulated LP for CI that implements the full contract and injects duplicates, reordering, crossed quotes and drops
+- LP health scoring and circuit breaking; per-symbol source selection and failover in one place
+- FIX session management (sequence numbers, resend, gap fill) — a further adapter behind the same interface, not yet built
 
 ## Invariants
 
@@ -47,8 +48,8 @@ These are executed as tests at gate **G4**. A module may not declare an
 invariant it does not test.
 
 - INV-120: the core depends only on the LP interface, never on a vendor dialect.
-- INV-121: FIX sequence gaps are detected and resolved, never skipped.
-- INV-122: an LP execution report is applied exactly once.
+- INV-121: a failing provider is isolated behind its own circuit breaker and skipped in selection; an out-of-order or duplicate delivery is detected and recorded, never silently skipped.
+- INV-122: an LP execution report — a tick, a deal — is applied exactly once.
 
 ## Test obligations
 

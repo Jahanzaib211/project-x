@@ -53,6 +53,7 @@ invariant it does not test.
 - INV-081: every decision records the exact input snapshot and policy version that produced it.
 - INV-082: no order reaches execution without a recorded risk decision.
 - INV-083: risk failure is closed, not open — an unavailable risk engine rejects, never allows.
+- INV-084: an order on an instrument whose trading session is closed is refused before price or margin is considered; nothing fills at a frozen price.
 
 ## Test obligations
 

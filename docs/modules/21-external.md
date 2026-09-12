@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Tier** | T4 |
-| **Status** | `planned` |
+| **Status** | `in-progress` |
 | **Release approval** | manual |
 | **Required gates** | `G0` `G1` `G2` `G4` `G5` `G6` `G8` |
 
@@ -34,9 +34,10 @@ _nothing depends on this module yet._
 
 ## What gets built
 
-- platform adapter interface and per-platform implementations
-- symbol, account and order mapping tables
-- bidirectional reconciliation between platform state and core state
+- one bridge protocol (services/mt5-sim/src/protocol.md) spoken by the real MT5 terminal under Wine and by a simulator for CI
+- symbol, account and action mapping tables; platform deals keyed by ticket
+- bidirectional reconciliation between platform state and core state: the core's net position is mirrored to the platform; a platform-originated deal enters the core only through the OMS
+- breaks raised on divergence that survives mirroring, resolved when the two agree again; operator surface to map, unmap and run a cycle
 
 ## Invariants
 

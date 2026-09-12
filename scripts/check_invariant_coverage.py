@@ -23,7 +23,7 @@ import sys
 from _registry import ROOT, load_registry, modules_by_id
 
 INV_PATTERN = re.compile(r"\bINV-(\d{3})\b")
-TEST_ROOTS = ["tests", "crates", "services", "scripts", "infra"]
+TEST_ROOTS = ["tests", "crates", "services", "scripts", "infra", "apps"]
 SKIP_DIRS = {"target", "node_modules", ".git", "dist", ".next"}
 ENFORCED_STATUSES = {"in-progress", "done"}
 
@@ -36,7 +36,9 @@ def tags_in_tests() -> dict[str, set[pathlib.Path]]:
         if not root.exists():
             continue
         for path in root.rglob("*"):
-            if not path.is_file() or path.suffix not in {".rs", ".ts", ".py", ".sql", ".sh"}:
+            # JavaScript suites count too: the edge services and the two apps
+            # keep their tests in node:test files beside the code they prove.
+            if not path.is_file() or path.suffix not in {".rs", ".ts", ".js", ".py", ".sql", ".sh"}:
                 continue
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
@@ -47,7 +49,7 @@ def tags_in_tests() -> dict[str, set[pathlib.Path]]:
             # Only count a file that actually contains tests.
             if not any(
                 marker in text
-                for marker in ("#[test]", "fn inv_", "def test_", "it(", "CREATE TRIGGER", "pass()")
+                for marker in ("#[test]", "fn inv_", "def test_", "it(", "test(", "CREATE TRIGGER", "pass()")
             ):
                 continue
             for match in INV_PATTERN.finditer(text):

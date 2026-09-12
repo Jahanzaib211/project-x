@@ -31,7 +31,7 @@ _Change policy: manual release approval, perf gate mandatory._
 - [`06-market-data`](06-market-data.md) — Market Data · `in-progress`
 - [`07-pricing`](07-pricing.md) — Pricing Engine · `in-progress`
 - [`12-risk-book`](12-risk-book.md) — Internal Risk Book · `planned`
-- [`13-lp-connectivity`](13-lp-connectivity.md) — LP / FIX Connectivity · `planned`
+- [`13-lp-connectivity`](13-lp-connectivity.md) — LP / FIX Connectivity · `in-progress`
 - [`14-hedging`](14-hedging.md) — Routing and Hedging · `planned`
 
 ### T2 — Financial Operations
@@ -57,7 +57,7 @@ _Change policy: automated canary, auto-promote._
 
 - [`19-client-api`](19-client-api.md) — Client API · `in-progress`
 - [`20-web`](20-web.md) — Web and Mobile · `in-progress`
-- [`21-external`](21-external.md) — External Platform Integrations (MT5 et al.) · `planned`
+- [`21-external`](21-external.md) — External Platform Integrations (MT5 et al.) · `in-progress`
 
 
 ## Build order

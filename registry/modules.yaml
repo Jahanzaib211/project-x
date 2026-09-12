@@ -197,10 +197,15 @@ modules:
       - "INV-030: available balance == balance - reservations - used margin; never negative without an explicit deficit event."
       - "INV-031: no balance mutation exists without a corresponding ledger transaction."
       - "INV-032: a frozen or closed account cannot originate new financial effects."
+      - "INV-033: an account number identifies exactly one ledger account and one client-area record; the ledger issues every number."
+      - "INV-034: demo capital is issued only to an active demo account, idempotently per request, and never past the demo cap."
+      - "INV-035: a demo reset is a correction back to the opening grant, made only while the account is flat."
     tests:
       - "deposit, withdrawal reservation, release, fee, adjustment"
       - "freeze and close blocks every mutating path"
       - "reservation double-release is idempotent"
+      - "an account opened in either mode exists in the ledger and the client area under one number"
+      - "a retried demo credit posts once; a real account is refused; the cap holds exactly"
     failure_modes:
       - "balance updated directly instead of via the ledger"
       - "reservation leaked on a failed withdrawal"
@@ -253,10 +258,14 @@ modules:
       - "per-symbol staleness tracking and explicit stale marking"
       - "sequence-gap detection, resync and reconnect"
       - "market state snapshots for deterministic replay"
+      - "trading-session calendar per instrument class (FX, metals, crypto, fixed holidays), pure in the tick"
+      - "recorded feed store with an append-only log, per-symbol modes (synthetic or recorded-from-source) logged with the tick they took effect, and an operator-settable source order per class"
     invariants:
       - "INV-050: a quote that fails validation never reaches the canonical book."
       - "INV-051: market state carries an explicit freshness age; consumers must be able to reject stale state."
       - "INV-052: the canonical book is reproducible from the recorded feed."
+      - "INV-053: outside its trading session an instrument produces no new price; its quote is frozen at the last open tick and says so."
+      - "INV-054: the recorded feed rebuilt from its log is identical to the one that wrote it, digest for digest."
     tests:
       - "stale feed, duplicate quote, out-of-order quote, sequence gap"
       - "crossed market, negative price, zero price, absurd spread"
@@ -355,6 +364,7 @@ modules:
       - "INV-081: every decision records the exact input snapshot and policy version that produced it."
       - "INV-082: no order reaches execution without a recorded risk decision."
       - "INV-083: risk failure is closed, not open — an unavailable risk engine rejects, never allows."
+      - "INV-084: an order on an instrument whose trading session is closed is refused before price or margin is considered; nothing fills at a frozen price."
     tests:
       - "property + fuzz over the whole input space"
       - "boundary: exactly-at-limit, one-tick-over, zero-equity, stale-market"
@@ -460,7 +470,7 @@ modules:
   - id: "13-lp-connectivity"
     name: "LP / FIX Connectivity"
     tier: T1
-    status: planned
+    status: in-progress
     depends_on: ["06-market-data", "10-oms"]
     required_gates: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
     release_approval: manual
@@ -470,15 +480,16 @@ modules:
     inputs: ["LP sessions", "orders"]
     outputs: ["quotes", "executions", "LP health"]
     builds:
-      - "LiquidityProvider trait: connect, subscribe, send_order, cancel, receive_execution, heartbeat"
-      - "per-LP adapters behind that one interface"
-      - "FIX session management: sequence numbers, resend, gap fill, logon/logout"
-      - "a simulated LP for CI that implements the full contract"
-      - "LP health scoring and circuit breaking"
+      - "one adapter interface: start, stop, health, backfill — every provider dialect translated to canonical ticks behind it"
+      - "per-provider adapters: Binance (keyless, live book plus kline backfill), Twelve Data, Finnhub, the MT5 bridge over SSE"
+      - "session management per adapter: reconnect with backoff, heartbeat, subscription, symbol mapping table"
+      - "a simulated LP for CI that implements the full contract and injects duplicates, reordering, crossed quotes and drops"
+      - "LP health scoring and circuit breaking; per-symbol source selection and failover in one place"
+      - "FIX session management (sequence numbers, resend, gap fill) — a further adapter behind the same interface, not yet built"
     invariants:
       - "INV-120: the core depends only on the LP interface, never on a vendor dialect."
-      - "INV-121: FIX sequence gaps are detected and resolved, never skipped."
-      - "INV-122: an LP execution report is applied exactly once."
+      - "INV-121: a failing provider is isolated behind its own circuit breaker and skipped in selection; an out-of-order or duplicate delivery is detected and recorded, never silently skipped."
+      - "INV-122: an LP execution report — a tick, a deal — is applied exactly once."
     tests:
       - "contract suite run identically against every adapter and the simulator"
       - "connect, disconnect, reconnect, heartbeat timeout"
@@ -703,7 +714,7 @@ modules:
   - id: "21-external"
     name: "External Platform Integrations (MT5 et al.)"
     tier: T4
-    status: planned
+    status: in-progress
     depends_on: ["19-client-api"]
     required_gates: [G0, G1, G2, G4, G5, G6, G8]
     release_approval: manual
@@ -713,9 +724,10 @@ modules:
     inputs: ["client api", "platform gateways"]
     outputs: ["platform adapters", "bridge state", "reconciliation feeds"]
     builds:
-      - "platform adapter interface and per-platform implementations"
-      - "symbol, account and order mapping tables"
-      - "bidirectional reconciliation between platform state and core state"
+      - "one bridge protocol (services/mt5-sim/src/protocol.md) spoken by the real MT5 terminal under Wine and by a simulator for CI"
+      - "symbol, account and action mapping tables; platform deals keyed by ticket"
+      - "bidirectional reconciliation between platform state and core state: the core's net position is mirrored to the platform; a platform-originated deal enters the core only through the OMS"
+      - "breaks raised on divergence that survives mirroring, resolved when the two agree again; operator surface to map, unmap and run a cycle"
     invariants:
       - "INV-200: the external platform is never the financial source of truth."
       - "INV-201: platform state is reconciled against the core continuously, and divergence raises a break."

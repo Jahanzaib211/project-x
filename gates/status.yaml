@@ -59,10 +59,20 @@ passed:
   # running service: kill -9, restart, balance identical (INV-024).
   # Also verified earlier at the schema level by
   # scripts/verify_ledger_constraints.sh (INV-010, 011, 012, 020, 021, 022).
-  03-ledger: [G0, G1, G2, G4, G5, G6]
+  # G7 scripts/chaos_suite.sh: kill -9 the database mid-flight, INV-024 and
+  # INV-020 re-asserted after recovery, replay equivalence re-run.
+  # G8 scripts/check_security.sh against the running service: authorization
+  # matrix, credential fuzzing, image scan of the ledger image.
+  03-ledger: [G0, G1, G2, G4, G5, G6, G7, G8]
 
-  # G4 INV-030..032 executed. G5 via the end-to-end account-opening flow.
-  04-account: [G0, G1, G2, G4, G5]
+  # G4 INV-030..035 executed: the lifecycle switch, demo credits bounded and
+  # idempotent, resets only while flat, and INV-033 by the ledger opening
+  # both modes through one door. G5 via tests/e2e accounts.spec.js — an
+  # account opened from either tab is found where it was opened, funded or
+  # honestly unfunded, and a demo deposit settles in the ledger.
+  # G6 account records, status changes and credits replay from the journal
+  # (state.rs: inv_024_modes_statuses_and_credits_survive_a_restart).
+  04-account: [G0, G1, G2, G4, G5, G6]
 
   # G4 INV-040..043 executed, including reversal through zero and the
   # equivalence of partial closes to one whole close.
@@ -70,19 +80,32 @@ passed:
   # recovery test asserts them alongside balances.
   05-position: [G0, G1, G2, G4, G5, G6]
 
-  # G4 INV-050..052 executed. G6 the feed is a pure function of the tick index,
-  # so any past state recomputes exactly; asserted across every instrument.
-  06-market-data: [G0, G1, G2, G4, G5, G6]
+  # G3 tests/invariants/tests/feed_laws.rs: seeded generators over thousands
+  # of quote streams — crossed, negative, absurd, reordered, duplicated —
+  # with a reproducible seed on failure.
+  # G4 INV-050..054 executed: validation at the door and the spike filter,
+  # staleness carried on every recorded quote, the session calendar freezing
+  # a closed market, and the recorded store rebuilt from its log digest for
+  # digest. G6 the synthetic series is a pure function of the tick and the
+  # recorded feed replays from feed.log (state.rs: inv_054_the_state_replays_
+  # from_its_log_identically). G7 scripts/chaos_suite.sh kills market-data
+  # mid-ingest and asserts the record replays and quotes serve. G9
+  # scripts/check_performance.sh measures /v1/quotes, /v1/feed/status and
+  # /v1/sessions against a recorded baseline.
+  06-market-data: [G0, G1, G2, G3, G4, G5, G6, G7, G9]
 
-  # G4 INV-060..063 executed. G6 as above: same input, byte-identical quote.
-  07-pricing: [G0, G1, G2, G4, G5, G6]
+  # G4 INV-060..063 executed against a venue quote fetched from market-data;
+  # a frozen quote is served with its session rather than refused as stale.
+  # G6 same venue quote, byte-identical client quote. G9 as above (/v1/quote).
+  07-pricing: [G0, G1, G2, G4, G5, G6, G9]
 
   # G4 INV-070..073 executed, including the zero-used-margin case that is a
   # division fault in most implementations.
   08-pnl-margin: [G0, G1, G2, G4, G5]
 
-  # G4 INV-080..083 executed. The fail-closed path is a function that is called
-  # and asserted on, not a comment.
+  # G4 INV-080..084 executed. The fail-closed path is a function that is called
+  # and asserted on, not a comment; a closed session is refused before price
+  # or margin is looked at, and proven live on a weekend in tests/e2e.
   09-risk: [G0, G1, G2, G4, G5]
 
   # G4 INV-090..093 executed, including the full legal-transition matrix and
@@ -94,11 +117,38 @@ passed:
   # postings for the same close, and that a failed execution books nothing.
   11-execution: [G0, G1, G2, G4, G5]
 
-  # G4 INV-180..184 executed by scripts/check_client_area_invariants.sh, both
-  # statically and against the running service.
-  # G5 tests/e2e — 22 browser tests through the whole stack.
-  19-client-api: [G0, G1, G2, G4, G5]
+  # G3 tests/invariants/tests/feed_laws.rs generates the quote streams the
+  # gateway is measured against; G4 INV-120..122 executed: the mapping table
+  # and the adapter contract (parsers for every provider dialect, the
+  # simulator with injected faults), the circuit breaker and per-symbol
+  # failover, exactly-once at the store. G5 the contract suite runs against
+  # every parser and the simulator, and tests/e2e prices the whole stack on
+  # the simulated bridge through the gateway. G6 the record replays. G7 the
+  # gateway rides out market-data being killed mid-push (chaos suite). G8
+  # the feed-gateway image is scanned and its surface is health, metrics and
+  # a status view. G9 the feed's read paths are measured.
+  13-lp-connectivity: [G0, G1, G2, G3, G4, G5, G6, G7, G8, G9]
 
-  # G4 INV-190..191 executed by the rendered-output suite and the live checks.
-  # G5 as above, including a run with JavaScript disabled.
-  20-web: [G0, G1, G2, G4, G5]
+  # G4 INV-180..192 executed by scripts/check_client_area_invariants.sh, both
+  # statically and against the running service, signed in as the gate's own
+  # identity. G5 tests/e2e — 55 browser tests through the whole stack.
+  # G8 scripts/check_security.sh: authorization matrix, session and reset
+  # hardening, fuzzing, image scan. G9 scripts/check_performance.sh.
+  19-client-api: [G0, G1, G2, G4, G5, G8, G9]
+
+  # G4 INV-190..192 executed by the rendered-output suite and the live checks.
+  # G5 as above, including a run with JavaScript disabled and the chart suite
+  # mounting over the fallback. G8 the web image is scanned and the session
+  # cookie is proven HttpOnly, SameSite and absent from every body.
+  20-web: [G0, G1, G2, G4, G5, G8]
+
+  # G4 INV-200/201 executed: the reconciler's plan is a pure function of the
+  # two states, and a source test proves it names no ledger write. G5 the
+  # simulator speaks the bridge protocol end to end — mirroring and a
+  # platform-originated deal carried into the core through the OMS — and the
+  # real bridge image builds (a MetaTrader 5 terminal under Wine 10) and
+  # reports `unconfigured` until a login is supplied. G6 reconciliation is a
+  # fold over recorded platform and ledger snapshots. G8 the mt5-sim image is
+  # scanned; bridge credentials are environment only and the secret scan runs
+  # over the tree.
+  21-external: [G0, G1, G2, G4, G5, G6, G8]

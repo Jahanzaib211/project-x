@@ -115,6 +115,10 @@ checks=(
   "session|40|$API/v1/auth/session|auth|150"
   "accounts|25|$API/v1/accounts?status=active|auth|200"
   "valuation|25|$API/v1/trading-accounts/$account/state|auth|250"
+  # The feed: every price the system serves passes through these.
+  "quotes|40|$API/v1/quotes||150"
+  "feed-status|25|${MARKET_DATA:-http://127.0.0.1:27003}/v1/feed/status||100"
+  "sessions|25|$API/v1/sessions||100"
   "web-page|15|$WEB/||900"
 )
 

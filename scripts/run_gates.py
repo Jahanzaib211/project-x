@@ -22,7 +22,7 @@ GATE_COMMANDS: dict[str, list[str]] = {
     "G4": ["make", "--no-print-directory", "test-invariants"],
     "G5": ["make", "--no-print-directory", "test-integration"],
     "G6": ["make", "--no-print-directory", "test-replay"],
-    "G7": [],  # chaos — CI only
+    "G7": ["make", "--no-print-directory", "chaos"],
     "G8": ["make", "--no-print-directory", "test-security"],
     "G9": ["make", "--no-print-directory", "test-performance"],
 }

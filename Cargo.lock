@@ -41,6 +41,7 @@ version = "0.1.0"
 dependencies = [
  "domain-kernel",
  "event-kernel",
+ "market-core",
 ]
 
 [[package]]

@@ -18,6 +18,9 @@
     "INV-030": "04-account",
     "INV-031": "04-account",
     "INV-032": "04-account",
+    "INV-033": "04-account",
+    "INV-034": "04-account",
+    "INV-035": "04-account",
     "INV-040": "05-position",
     "INV-041": "05-position",
     "INV-042": "05-position",
@@ -25,6 +28,8 @@
     "INV-050": "06-market-data",
     "INV-051": "06-market-data",
     "INV-052": "06-market-data",
+    "INV-053": "06-market-data",
+    "INV-054": "06-market-data",
     "INV-060": "07-pricing",
     "INV-061": "07-pricing",
     "INV-062": "07-pricing",
@@ -37,6 +42,7 @@
     "INV-081": "09-risk",
     "INV-082": "09-risk",
     "INV-083": "09-risk",
+    "INV-084": "09-risk",
     "INV-090": "10-oms",
     "INV-091": "10-oms",
     "INV-092": "10-oms",
@@ -72,8 +78,14 @@
     "INV-182": "19-client-api",
     "INV-183": "19-client-api",
     "INV-184": "19-client-api",
+    "INV-185": "19-client-api",
+    "INV-186": "19-client-api",
+    "INV-187": "19-client-api",
+    "INV-188": "19-client-api",
+    "INV-189": "19-client-api",
     "INV-190": "20-web",
     "INV-191": "20-web",
+    "INV-192": "20-web",
     "INV-200": "21-external",
     "INV-201": "21-external",
     "INV-900": "00-foundation",
@@ -148,7 +160,7 @@
       "depends_on": [
         "03-ledger"
       ],
-      "invariant_count": 3,
+      "invariant_count": 6,
       "required_gates": [
         "G0",
         "G1",
@@ -183,7 +195,7 @@
       "depends_on": [
         "02-event-kernel"
       ],
-      "invariant_count": 3,
+      "invariant_count": 5,
       "required_gates": [
         "G0",
         "G1",
@@ -244,7 +256,7 @@
       "depends_on": [
         "08-pnl-margin"
       ],
-      "invariant_count": 4,
+      "invariant_count": 5,
       "required_gates": [
         "G0",
         "G1",
@@ -339,7 +351,7 @@
         "G8",
         "G9"
       ],
-      "status": "planned",
+      "status": "in-progress",
       "tier": "T1"
     },
     "14-hedging": {
@@ -446,7 +458,7 @@
         "07-pricing",
         "10-oms"
       ],
-      "invariant_count": 5,
+      "invariant_count": 10,
       "required_gates": [
         "G0",
         "G1",
@@ -464,7 +476,7 @@
       "depends_on": [
         "19-client-api"
       ],
-      "invariant_count": 2,
+      "invariant_count": 3,
       "required_gates": [
         "G0",
         "G1",
@@ -490,9 +502,9 @@
         "G6",
         "G8"
       ],
-      "status": "planned",
+      "status": "in-progress",
       "tier": "T4"
     }
   },
-  "test_count": 241
+  "test_count": 282
 }

@@ -138,4 +138,40 @@ export class Mt5Adapter extends Adapter {
     this.controller = null;
     controller?.abort();
   }
+
+  /**
+   * The bridge's own candle history, as ticks — open, high, low, close per
+   * minute — so a symbol that has just switched to this source has a day of
+   * chart behind it rather than a few minutes.
+   * @param {string} symbol
+   * @param {number} sinceMs
+   */
+  async backfill(symbol, sinceMs) {
+    const theirs = toProvider("mt5", symbol);
+    if (!theirs) return [];
+    const count = Math.min(2_000, Math.max(1, Math.ceil((Date.now() - sinceMs) / 60_000)));
+    const response = await fetch(
+      `${this.url}/v1/candles?symbol=${encodeURIComponent(theirs)}&timeframe=M1&count=${count}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!response.ok) throw new Error(`bridge candles ${response.status}`);
+    const rows = /** @type {{ms: number, open: string, high: string, low: string, close: string}[]} */ (await response.json());
+    /** @type {import("./base.js").Tick[]} */
+    const ticks = [];
+    for (const row of rows) {
+      if (typeof row.ms !== "number" || row.ms < sinceMs) continue;
+      const o = decimal(row.open, 8);
+      const h = decimal(row.high, 8);
+      const l = decimal(row.low, 8);
+      const c = decimal(row.close, 8);
+      if (!o || !h || !l || !c) continue;
+      ticks.push(
+        { symbol, ms: row.ms, bid: o, ask: o, seq: 0 },
+        { symbol, ms: row.ms + 15_000, bid: h, ask: h, seq: 1 },
+        { symbol, ms: row.ms + 30_000, bid: l, ask: l, seq: 2 },
+        { symbol, ms: row.ms + 59_999, bid: c, ask: c, seq: 3 },
+      );
+    }
+    return ticks;
+  }
 }
