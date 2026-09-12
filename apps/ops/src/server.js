@@ -30,7 +30,7 @@ import {
   clearAttempts, issueSession, newCsrfToken, passcodeMatches, readCookie,
   readSession, recordFailedAttempt, retryAfterSeconds, withinAttemptBudget,
 } from "./session.js";
-import { callAdmin, platformStatus } from "./sources/api.js";
+import { callAdmin, platformStatus, proxyAdminStream } from "./sources/api.js";
 import { gateDefinitions, modules, tiers } from "./sources/registry.js";
 import * as infra from "./sources/infra.js";
 import * as gateRunner from "./sources/gates.js";
@@ -38,6 +38,7 @@ import { loginPage, page } from "./ui/layout.js";
 import { stylesheet } from "./ui/styles.js";
 import { overviewPage } from "./pages/overview.js";
 import { userDetailPage, usersPage } from "./pages/users.js";
+import { bridgePage, feedPage, ledgerPage, ordersPage, telemetryPage } from "./pages/trading.js";
 import {
   accountsPage, auditPage, databasePage, gatesPage, infraPage, logsPage,
   modulesPage, outboxPage,
@@ -318,6 +319,85 @@ const server = http.createServer(async (req, res) => {
         accounts: result.ok ? result.body.accounts ?? [] : [],
         error: result.error,
       }));
+    }
+
+    // ---- order book ----
+    if (path === "/orders") {
+      const account = (url.searchParams.get("account") ?? "").replace(/\D/g, "").slice(0, 12);
+      const result = await callAdmin("/v1/admin/orders?limit=500", { operator });
+      return render("Order book", ordersPage({
+        orders: result.ok ? result.body.orders ?? [] : [], account, error: result.error,
+      }), { refresh: 10 });
+    }
+
+    // ---- ledger ----
+    if (path === "/ledger") {
+      const kind = (url.searchParams.get("kind") ?? "").replace(/[^A-Z_]/g, "");
+      const after = (url.searchParams.get("after") ?? "").replace(/\D/g, "");
+      const query = new URLSearchParams({ limit: "100" });
+      if (kind) query.set("kind", kind);
+      if (after) query.set("after", after);
+      const [balances, invariants, journal] = await Promise.all([
+        callAdmin("/v1/admin/ledger/balances", { operator }),
+        callAdmin("/v1/admin/ledger/invariants", { operator }),
+        callAdmin(`/v1/admin/ledger/journal?${query}`, { operator }),
+      ]);
+      return render("Ledger", ledgerPage({
+        balances: balances.ok ? balances.body : null,
+        invariants: invariants.body ?? null,
+        journal: journal.ok ? journal.body : null,
+        error: balances.error && journal.error ? balances.error : null,
+        kind, after,
+      }));
+    }
+
+    // ---- the feed ----
+    if (path === "/feed") {
+      const result = await callAdmin("/v1/admin/feed", { operator });
+      return render("Market feed", feedPage({
+        feed: result.body ?? {}, csrf, error: result.error,
+        done: url.searchParams.get("done") ?? "", fail: url.searchParams.get("fail") ?? "",
+      }), { refresh: 15 });
+    }
+    if (path === "/feed/source" && method === "POST") {
+      const form = await readForm(req);
+      if (!csrfOk(form)) return redirect(res, "/feed?fail=expired");
+      const cls = String(form.get("class") ?? "");
+      const sources = String(form.get("sources") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      const result = await callAdmin("/v1/admin/feed/source", { method: "POST", operator, body: { class: cls, sources } });
+      log(result.ok ? "warn" : "error", "operator changed a feed source order", { operator, class: cls, sources, ok: result.ok });
+      return redirect(res, result.ok ? `/feed?done=${encodeURIComponent(cls)}` : `/feed?fail=${encodeURIComponent(result.error ?? "refused")}`);
+    }
+
+    // ---- telemetry ----
+    if (path === "/telemetry") {
+      const result = await callAdmin("/v1/admin/telemetry", { operator });
+      return render("Telemetry", telemetryPage({ telemetry: result.body ?? { users: [], tracked: 0 }, error: result.error }));
+    }
+    if (path === "/telemetry/stream") {
+      // The API's operator stream, piped through with the token attached
+      // here. The browser never holds the token.
+      return await proxyAdminStream(req, res, "/v1/admin/telemetry/stream", operator);
+    }
+
+    // ---- the bridge ----
+    if (path === "/bridge") {
+      const result = await callAdmin("/v1/admin/external", { operator });
+      return render("MT5 bridge", bridgePage({
+        external: result.body ?? {}, csrf, error: result.error,
+        done: url.searchParams.get("done") ?? "", fail: url.searchParams.get("fail") ?? "",
+      }), { refresh: 15 });
+    }
+    const bridgeAction = path.match(/^\/bridge\/(map|unmap|cycle)$/);
+    if (bridgeAction && method === "POST") {
+      const form = await readForm(req);
+      if (!csrfOk(form)) return redirect(res, "/bridge?fail=expired");
+      const action = String(bridgeAction[1]);
+      const body = action === "map" ? { ledgerAccount: String(form.get("ledgerAccount") ?? "").replace(/\D/g, "") } : {};
+      const result = await callAdmin(`/v1/admin/external/${action}`, { method: "POST", operator, body });
+      log(result.ok ? "warn" : "error", "operator bridge action", { operator, action, ok: result.ok });
+      const done = { map: "Mapping saved", unmap: "Mapping removed", cycle: "Cycle run" }[action] ?? action;
+      return redirect(res, result.ok ? `/bridge?done=${encodeURIComponent(done)}` : `/bridge?fail=${encodeURIComponent(result.error ?? "refused")}`);
     }
 
     // ---- gates ----

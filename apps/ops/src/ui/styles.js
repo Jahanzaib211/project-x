@@ -356,6 +356,11 @@ a.small, .back-link {
   border-radius: var(--r-md); font-size: 12.5px;
 }
 .notice-icon { color: var(--text-muted); margin-top: 1px; flex: none; }
+.notice-positive { border-color: var(--positive); }
+.notice-positive .notice-icon { color: var(--positive); }
+.is-negative { color: var(--danger); }
+.inline { display: inline-flex; gap: var(--s-2); align-items: center; }
+.card-foot { display: flex; gap: var(--s-2); justify-content: flex-end; padding: var(--s-3) var(--s-4); }
 .notice-body { min-width: 0; flex: 1; }
 .notice-title { font-weight: 600; margin-bottom: 2px; }
 .notice-text { color: var(--text-muted); line-height: 1.55; }

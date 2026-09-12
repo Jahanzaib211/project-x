@@ -32,6 +32,7 @@ import * as external from "./external.js";
 import { HttpError, requireAmount } from "./money.js";
 import { forward, upstream, UPSTREAM } from "./core.js";
 import { serveStream } from "./stream.js";
+import * as telemetry from "./telemetry.js";
 
 const PORT = Number(process.env.PORT ?? 8000);
 const SERVICE = "client-api";
@@ -757,6 +758,40 @@ async function routeAuth(req, res, path, method, url, identity) {
 }
 
 /**
+ * The telemetry snapshot with each active user's live ledger figures beside
+ * it: equity and margin level per account, read from the core now (INV-180 —
+ * forwarded, never computed here).
+ */
+async function telemetryView() {
+  const view = telemetry.snapshot();
+  const accounts = await forward(UPSTREAM.ledger, "/v1/accounts").catch(() => null);
+  /** @type {Map<string, {accountNumber: string, mode: string}[]>} */
+  const byOwner = new Map();
+  for (const a of accounts?.ok ? accounts.body.accounts ?? [] : []) {
+    if (a.status !== "active") continue;
+    const list = byOwner.get(a.owner) ?? [];
+    list.push({ accountNumber: String(a.accountNumber), mode: a.mode });
+    byOwner.set(a.owner, list);
+  }
+  const users = await Promise.all(view.users.map(async (user) => {
+    const held = (byOwner.get(user.owner) ?? []).slice(0, 5);
+    const valued = await Promise.all(held.map(async (account) => {
+      const state = await forward(UPSTREAM.ledger, `/v1/accounts/${account.accountNumber}/state`).catch(() => null);
+      const valuation = state?.ok ? state.body.valuation : null;
+      return {
+        ...account,
+        balance: valuation?.balance ?? null,
+        equity: valuation?.equity ?? null,
+        marginLevel: valuation?.marginLevel ?? null,
+        openPositions: valuation ? valuation.positions.length : null,
+      };
+    }));
+    return { ...user, accounts: valued };
+  }));
+  return { ...view, users };
+}
+
+/**
  * The operator surface. See `admin.js` for why it is reached differently from
  * everything else in this service.
  *
@@ -790,7 +825,24 @@ async function routeAdmin(req, res, path, method, url) {
     const action = userPath[2] ?? "";
 
     if (!action && method === "GET") {
-      return send(res, 200, await admin.userDetail(userId));
+      const detail = await admin.userDetail(userId);
+      // The person's order book, from the ledger: every account they hold
+      // there, valued now, with its open positions and full order history.
+      const held = await forward(UPSTREAM.ledger, `/v1/accounts?owner=${encodeURIComponent(userId)}`).catch(() => null);
+      const tradingAccounts = await Promise.all(
+        (held?.ok ? held.body.accounts ?? [] : []).map(async (/** @type {{accountNumber: string}} */ account) => {
+          const [state, orders] = await Promise.all([
+            forward(UPSTREAM.ledger, `/v1/accounts/${account.accountNumber}/state`).catch(() => null),
+            forward(UPSTREAM.ledger, `/v1/accounts/${account.accountNumber}/orders`).catch(() => null),
+          ]);
+          return {
+            ...account,
+            valuation: state?.ok ? state.body.valuation : null,
+            orders: orders?.ok ? orders.body.orders ?? [] : [],
+          };
+        }),
+      );
+      return send(res, 200, { ...detail, tradingAccounts, ledgerReachable: Boolean(held?.ok) });
     }
 
     if (method === "POST") {
@@ -846,6 +898,104 @@ async function routeAdmin(req, res, path, method, url) {
 
   if (path === "/v1/admin/isolation" && method === "GET") {
     return send(res, 200, await admin.isolation());
+  }
+
+  // ---------------------------------------------------------- the feed
+  if (path === "/v1/admin/feed" && method === "GET") {
+    const [status, adapters] = await Promise.all([
+      forward(UPSTREAM.marketData, "/v1/feed/status").catch(() => null),
+      forward(UPSTREAM.feedGateway, "/v1/adapters").catch(() => null),
+    ]);
+    return send(res, 200, {
+      marketData: status?.ok ? status.body : null,
+      marketDataError: status?.ok ? null : "market-data is unreachable",
+      gateway: adapters?.ok ? adapters.body : null,
+      gatewayError: adapters?.ok ? null : "the feed gateway is unreachable",
+    });
+  }
+  if (path === "/v1/admin/feed/source" && method === "POST") {
+    const body = /** @type {Record<string, unknown>} */ (await readBody(req));
+    const cls = String(body.class ?? "");
+    const sources = Array.isArray(body.sources) ? body.sources.map(String) : [];
+    const result = await forward(UPSTREAM.marketData, "/v1/feed/source", {
+      method: "POST", body: { class: cls, sources },
+    });
+    log("warn", "operator changed a feed source order", { operator, class: cls, sources, ok: result.ok });
+    return send(res, result.status, result.body);
+  }
+
+  // ---------------------------------------------------------- the ledger
+  if (path === "/v1/admin/ledger/balances" && method === "GET") {
+    const result = await forward(UPSTREAM.ledger, "/v1/balances");
+    return send(res, result.status, result.body);
+  }
+  if (path === "/v1/admin/ledger/journal" && method === "GET") {
+    const query = new URLSearchParams();
+    for (const key of ["after", "limit", "kind", "subject"]) {
+      const value = url.searchParams.get(key);
+      if (value !== null && /^[A-Za-z0-9_]{0,32}$/.test(value)) query.set(key, value);
+    }
+    const result = await forward(UPSTREAM.ledger, `/v1/journal?${query}`);
+    return send(res, result.status, result.body);
+  }
+  if (path === "/v1/admin/ledger/invariants" && method === "GET") {
+    const result = await forward(UPSTREAM.ledger, "/v1/invariants");
+    return send(res, result.status, result.body);
+  }
+  if (path === "/v1/admin/orders" && method === "GET") {
+    // Every order across every account, newest first, with its owner.
+    const limit = Number(url.searchParams.get("limit") ?? 200);
+    const [orders, accountsList] = await Promise.all([
+      forward(UPSTREAM.ledger, `/v1/orders?limit=${Math.max(1, Math.min(2000, limit || 200))}`),
+      forward(UPSTREAM.ledger, "/v1/accounts"),
+    ]);
+    /** @type {Map<string, {owner: string, mode: string}>} */
+    const owners = new Map();
+    for (const a of accountsList.ok ? accountsList.body.accounts ?? [] : []) {
+      owners.set(String(a.accountNumber), { owner: a.owner, mode: a.mode });
+    }
+    const rows = (orders.ok ? orders.body.orders ?? [] : []).map((/** @type {Record<string, unknown>} */ o) => ({
+      ...o, owner: owners.get(String(o.account))?.owner ?? null, mode: owners.get(String(o.account))?.mode ?? null,
+    }));
+    return send(res, orders.status, { orders: rows });
+  }
+  const adminAccount = path.match(/^\/v1\/admin\/trading-accounts\/(\d+)\/(state|orders|statement)$/);
+  if (adminAccount && method === "GET") {
+    const result = await forward(UPSTREAM.ledger, `/v1/accounts/${adminAccount[1]}/${adminAccount[2]}`);
+    return send(res, result.status, result.body);
+  }
+  if (path === "/v1/admin/trading-accounts" && method === "GET") {
+    const ownerFilter = url.searchParams.get("owner");
+    const result = await forward(
+      UPSTREAM.ledger,
+      ownerFilter ? `/v1/accounts?owner=${encodeURIComponent(ownerFilter)}` : "/v1/accounts",
+    );
+    return send(res, result.status, result.body);
+  }
+
+  // ------------------------------------------------------- telemetry
+  if (path === "/v1/admin/telemetry" && method === "GET") {
+    return send(res, 200, await telemetryView());
+  }
+  if (path === "/v1/admin/telemetry/stream" && method === "GET") {
+    res.writeHead(200, {
+      "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no",
+    });
+    res.write("retry: 2000\n\n");
+    let busy = false;
+    const push = async () => {
+      if (busy || res.writableEnded) return;
+      busy = true;
+      try {
+        res.write(`event: telemetry\ndata: ${JSON.stringify(await telemetryView())}\n\n`);
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = setInterval(() => void push(), 1_000);
+    void push();
+    req.on("close", () => { clearInterval(timer); if (!res.writableEnded) res.end(); });
+    return undefined;
   }
 
   // ------------------------------------------------------ 21-external
@@ -911,6 +1061,15 @@ async function route(req, res) {
 
   const identity = await identify(req);
   const owner = identity.owner;
+  // Recorded when the response finishes, whatever it was — a refusal is as
+  // much a fact about what a person is doing as a success.
+  const startedAt = Date.now();
+  res.once("finish", () => {
+    telemetry.record({
+      owner, authenticated: Boolean(identity.session), path, method,
+      status: res.statusCode, ms: Date.now() - startedAt,
+    });
+  });
   const clientKey = String(
     identity.session?.user.userId ?? req.headers["x-client-id"] ?? req.socket.remoteAddress ?? "anonymous",
   );
@@ -957,10 +1116,13 @@ async function route(req, res) {
   if (path === "/v1/quote") {
     const query = marketDataQuery(url);
     const symbol = query.get("symbol");
-    return send(res, 200, await upstream(
+    // Forwarded with pricing's own status: a 409 "stale" is an answer the
+    // terminal shows as such, not a broken dependency (INV-180).
+    const result = await forward(
       UPSTREAM.pricing,
       `/v1/quote${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
-    ));
+    );
+    return send(res, result.status, result.body);
   }
 
   // ---------------------------------------------------------- market data

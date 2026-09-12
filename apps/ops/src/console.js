@@ -168,3 +168,85 @@ initTheme();
 initConfirmations();
 initActionResult();
 initRefresh();
+
+/* ---------------------------------------------------------- telemetry */
+
+/**
+ * The telemetry page stays live: the table is re-rendered from each event
+ * on the operator stream. Built as nodes — every cell is somebody's request
+ * path, which is somebody's input.
+ */
+function initTelemetry() {
+  const host = $("[data-telemetry]");
+  const state = $("[data-telemetry-state]");
+  if (!host) return;
+  const stream = new EventSource("/telemetry/stream");
+  stream.addEventListener("open", () => { if (state) state.textContent = "live"; });
+  stream.addEventListener("error", () => { if (state) state.textContent = "reconnecting…"; });
+  stream.addEventListener("telemetry", (event) => {
+    /** @type {{users: any[], tracked: number, at: string}} */
+    let data;
+    try { data = JSON.parse(/** @type {MessageEvent} */ (event).data); } catch { return; }
+    if (state) state.textContent = `live · ${new Date(data.at).toLocaleTimeString("en-GB")}`;
+    renderTelemetry(host, data);
+    const kpis = $$("[data-telemetry-kpis] .kpi-value");
+    const sum = (/** @type {string} */ key) => data.users.reduce((n, u) => n + (Number(u[key]) || 0), 0);
+    if (kpis[0]) kpis[0].textContent = String(data.users.length);
+    if (kpis[1]) kpis[1].textContent = String(sum("requestsPerMinute"));
+    if (kpis[2]) kpis[2].textContent = String(sum("ordersPerMinute"));
+  });
+}
+
+/**
+ * @param {HTMLElement} host
+ * @param {{users: any[]}} data
+ */
+function renderTelemetry(host, data) {
+  const table = host.querySelector("tbody");
+  if (!table) { location.reload(); return; }
+  const cell = (/** @type {string} */ text, /** @type {string} */ cls = "") => {
+    const td = document.createElement("td");
+    td.className = cls;
+    td.textContent = text;
+    return td;
+  };
+  const rows = data.users.map((u) => {
+    const tr = document.createElement("tr");
+    const who = document.createElement("td");
+    who.className = "small";
+    if (u.authenticated && String(u.owner).includes("-")) {
+      const a = document.createElement("a");
+      a.className = "row-link";
+      a.href = `/users/${encodeURIComponent(u.owner)}`;
+      a.textContent = `${String(u.owner).slice(0, 8)}…`;
+      who.append(a);
+    } else {
+      who.textContent = String(u.owner);
+      who.classList.add("muted", "mono");
+    }
+    const accounts = document.createElement("td");
+    accounts.className = "small";
+    for (const a of u.accounts ?? []) {
+      const line = document.createElement("div");
+      line.className = "mono";
+      line.textContent = `${a.accountNumber} eq ${a.equity ?? "—"} ml ${a.marginLevel ?? "—"}${a.openPositions ? ` (${a.openPositions} open)` : ""}`;
+      accounts.append(line);
+    }
+    if (!accounts.childElementCount) accounts.textContent = "—";
+    tr.append(
+      who,
+      cell(String(u.requestsPerMinute), "num mono small"),
+      cell(String(u.errorsPerMinute), `num mono small${u.errorsPerMinute ? " is-negative" : ""}`),
+      cell(String(u.throttledPerMinute), `num mono small${u.throttledPerMinute ? " is-negative" : ""}`),
+      cell(`${u.ordersPerMinute} / ${u.orders}`, "num mono small"),
+      cell(`${u.meanMs} ms`, "num mono small"),
+      cell(`${u.lastPath} ${u.lastStatus}`, "small mono truncate"),
+      accounts,
+      cell("just now", "num small muted"),
+    );
+    return tr;
+  });
+  table.replaceChildren(...rows);
+}
+
+initTelemetry();

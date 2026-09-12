@@ -86,3 +86,47 @@ export async function platformStatus() {
     clearTimeout(timer);
   }
 }
+
+/**
+ * Pipe an operator event stream to the browser, token attached here.
+ *
+ * The console's telemetry page is the one place that stays live without a
+ * refresh; the stream is the API's, and this is only a pipe.
+ *
+ * @param {import("node:http").IncomingMessage} req
+ * @param {import("node:http").ServerResponse} res
+ * @param {string} path
+ * @param {string} operator
+ */
+export async function proxyAdminStream(req, res, path, operator) {
+  const controller = new AbortController();
+  req.on("close", () => controller.abort());
+  let upstream;
+  try {
+    upstream = await fetch(`${API_URL}${path}`, {
+      headers: { accept: "text/event-stream", "x-ops-token": OPS_TOKEN, "x-ops-operator": operator.slice(0, 80) },
+      signal: controller.signal,
+    });
+  } catch {
+    res.writeHead(503, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: "api_unavailable" }));
+  }
+  if (!upstream.ok || !upstream.body) {
+    res.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ error: "stream_unavailable" }));
+  }
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
+  const reader = upstream.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!res.write(value)) await new Promise((resolve) => res.once("drain", resolve));
+    }
+  } catch {
+    /* gone */
+  } finally {
+    if (!res.writableEnded) res.end();
+  }
+  return undefined;
+}

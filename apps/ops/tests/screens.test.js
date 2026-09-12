@@ -22,6 +22,7 @@ import {
   accountsPage, auditPage, databasePage, gatesPage, infraPage, logsPage,
   modulesPage, outboxPage,
 } from "../src/pages/system.js";
+import { bridgePage, feedPage, ledgerPage, ordersPage, telemetryPage } from "../src/pages/trading.js";
 import { parseYaml } from "../src/sources/registry.js";
 
 /* ------------------------------------------------------------- fixtures */
@@ -212,6 +213,54 @@ const SCREENS = {
     service: "ops", sources: ["web", "ops"],
     result: { available: false, error: "no container and no .run/ops.log", source: "", lines: [] },
   }),
+  "/orders": ordersPage({
+    orders: [{
+      orderId: "o1", state: "FILLED", account: "50000001", owner: user.userId, mode: "demo", symbol: "BTCUSD",
+      side: "BUY", volume: "0.010", timestampMs: 1789168703250, deal: { price: "77146.41", realised: "0.00" }, rejection: null,
+    }, {
+      orderId: "o2", state: "REJECTED", account: "50000001", owner: user.userId, mode: "demo", symbol: "XAUUSD",
+      side: "SELL", volume: "0.100", timestampMs: 1789168703250, deal: null, rejection: { code: "MARKET_CLOSED", detail: "closed" },
+    }],
+    account: "", error: null,
+  }),
+  "/orders (error)": ordersPage({ orders: [], account: "", error: "the client API is unreachable" }),
+  "/ledger": ledgerPage({
+    balances: { balanced: true, version: 3, balances: [{ account: "client:cash:50000001", currency: "USD", signed: "-10000.00" }, { account: "equity:demo-capital", currency: "USD", signed: "10000.00" }] },
+    invariants: { healthy: true, "INV-023_projection_drift": 0 },
+    journal: { total: 3, transactions: [{ sequence: 1, kind: "DEMO_CREDIT", subject: "50000001", entries: [{ account: "equity:demo-capital", amount: "10000.00", currency: "USD" }, { account: "client:cash:50000001", amount: "-10000.00", currency: "USD" }] }] },
+    error: null, kind: "", after: "",
+  }),
+  "/ledger (imbalanced)": ledgerPage({
+    balances: { balanced: false, version: 1, balances: [] }, invariants: { healthy: false, "INV-023_projection_drift": 1 },
+    journal: { total: 0, transactions: [] }, error: null, kind: "FEE", after: "10",
+  }),
+  "/feed": feedPage({
+    feed: {
+      marketData: { tick: 1, stateHash: "abc", recorded: 10, outOfOrder: 1, refused: 2, classes: { Crypto: ["binance", "synthetic"] },
+        instruments: [{ symbol: "BTCUSD", class: "Crypto", mode: "recorded", source: "binance", recordedQuotes: 10, recordedAgeMs: 250, sources: ["binance", "synthetic"], session: { open: true } },
+                      { symbol: "XAUUSD", class: "Metal", mode: "synthetic", source: "synthetic", recordedQuotes: 0, recordedAgeMs: null, sources: ["synthetic"], session: { open: false } }] },
+      gateway: { selected: { BTCUSD: "binance" }, counters: { failovers: 0, forwarded: 5, dropped: 1 },
+        adapters: { binance: { state: "connected", symbols: ["BTCUSD"], ticksPerSecond: "3.0", lastTickMs: Date.now(), errors: 0, detail: "" },
+                    twelvedata: { state: "unconfigured", symbols: [], ticksPerSecond: "0.0", lastTickMs: null, errors: 0, detail: "no key" } } },
+    }, csrf: "tok", error: null, done: "Crypto",
+  }),
+  "/feed (down)": feedPage({ feed: {}, csrf: "tok", error: "the client API is unreachable" }),
+  "/telemetry": telemetryPage({
+    telemetry: { at: "2026-09-11T08:00:00.000Z", tracked: 1, users: [{ owner: user.userId, authenticated: true, lastSeen: "2026-09-11T08:00:00.000Z",
+      lastPath: "POST /v1/orders", lastStatus: 201, requests: 9, requestsPerMinute: 4, errorsPerMinute: 0, throttledPerMinute: 0, ordersPerMinute: 1,
+      orders: 3, refusedOrders: 1, errors: 0, throttled: 0, streams: 1, meanMs: 12, slowestMs: 40, topEndpoints: [],
+      accounts: [{ accountNumber: "50000001", mode: "demo", balance: "10000.00", equity: "10001.10", marginLevel: "2500.00", openPositions: 1 }] }] },
+    error: null,
+  }),
+  "/telemetry (error)": telemetryPage({ telemetry: { users: [], tracked: 0 }, error: "unauthenticated" }),
+  "/bridge": bridgePage({
+    external: { bridge: { state: "connected", server: "Sim", login: "1", simulated: true, detail: "" },
+      mapping: { ledgerAccount: "50000001", platformLogin: "1" }, openBreaks: 1, counters: { cycles: 4 }, cycleMs: 5000, lastCycleAt: "2026-09-11T08:00:00.000Z", lastError: null, dealsCarried: 2,
+      breaks: [{ resolved_at: null, kind: "position_mismatch", symbol: "BTCUSD", ledger_value: "0.010", platform_value: "0.020", detail: "net lots differ", opened_at: "2026-09-11T08:00:00.000Z" }],
+      actions: [{ at: "2026-09-11T08:00:00.000Z", kind: "mirror_open", ledger_account: "50000001", symbol: "BTCUSD", side: "BUY", volume: "0.010", outcome: "done", reference: "px:1", detail: "deal 2" }] },
+    csrf: "tok", error: null,
+  }),
+  "/bridge (unconfigured)": bridgePage({ external: { bridge: { state: "unconfigured", detail: "no login" }, mapping: null, breaks: [], actions: [], counters: {} }, csrf: "tok", error: null, fail: "expired" }),
 };
 
 /** @param {string} body */
@@ -274,6 +323,7 @@ test("every internal link points at a console route", () => {
   const ROUTES = new Set([
     "/", "/users", "/accounts", "/gates", "/modules", "/infra",
     "/database", "/audit", "/outbox", "/logs", "/login", "/logout",
+    "/orders", "/ledger", "/feed", "/telemetry", "/bridge",
   ]);
   const offenders = [];
   for (const [name, body] of Object.entries(SCREENS)) {

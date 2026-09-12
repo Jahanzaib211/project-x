@@ -97,7 +97,12 @@ struct PricingConfig {
 const CONFIG: PricingConfig = PricingConfig {
     version: "pricing-v1",
     markup_bps: 20,
-    max_age_ms: 500,
+    // The default; the service reads MAX_QUOTE_STALENESS_MS at startup. Two
+    // seconds matches what risk will accept (`risk_core::MAX_MARKET_AGE_MS`):
+    // a real feed delivers on its own cadence, and a quote a second old is
+    // the market, not a fault. Stale is still refused, just at the same
+    // line the rest of the system draws.
+    max_age_ms: 2_000,
 };
 
 /// The client quote derived from a venue quote, as raw price units.
@@ -134,13 +139,18 @@ fn error(status: u16, code: &str, detail: &str) -> Response {
     )
 }
 
-fn handle(request: &Request, now: u64, venue: &VenueSource) -> Option<Response> {
+fn handle(
+    request: &Request,
+    now: u64,
+    venue: &VenueSource,
+    config: &PricingConfig,
+) -> Option<Response> {
     match request.path.as_str() {
         "/v1/config" => Some(Response::json(
             200,
             format!(
                 r#"{{"version":"{}","markupBps":{},"maxAgeMs":{},"tickMs":{TICK_MS},"invariants":["INV-060","INV-061","INV-062","INV-063"]}}"#,
-                escape(CONFIG.version),
+                escape(config.version),
                 CONFIG.markup_bps,
                 CONFIG.max_age_ms
             ),
@@ -170,18 +180,18 @@ fn handle(request: &Request, now: u64, venue: &VenueSource) -> Option<Response> 
             // frozen quote on a closed market is not stale: its age is the
             // age of the state it was frozen *at* (INV-053).
             let age_ms = venue_quote.age_ms(now);
-            if age_ms > CONFIG.max_age_ms && venue_quote.session_open() {
+            if age_ms > config.max_age_ms && venue_quote.session_open() {
                 return Some(error(
                     409,
                     "stale_market_state",
                     &format!(
                         "market state is {age_ms}ms old, limit is {}ms",
-                        CONFIG.max_age_ms
+                        config.max_age_ms
                     ),
                 ));
             }
 
-            match client_quote(&venue_quote, instrument, &CONFIG) {
+            match client_quote(&venue_quote, instrument, config) {
                 Ok((bid, mid, ask)) => {
                     // INV-061, asserted before emission rather than assumed.
                     if bid > ask {
@@ -199,7 +209,7 @@ fn handle(request: &Request, now: u64, venue: &VenueSource) -> Option<Response> 
                             // INV-053 — a client is told the price is frozen
                             // rather than shown a still number with no reason.
                             market_core::session::state_json(instrument.session, tick),
-                            escape(CONFIG.version),
+                            escape(config.version),
                         ),
                     ))
                 }
@@ -219,6 +229,13 @@ fn main() -> std::io::Result<()> {
         std::env::var("MARKET_DATA_URL").unwrap_or_else(|_| "http://market-data:8000".to_owned());
     let venue: Box<VenueSource> =
         Box::new(move |instrument, tick| remote_venue(&base, instrument, tick));
+    let config = PricingConfig {
+        max_age_ms: std::env::var("MAX_QUOTE_STALENESS_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(CONFIG.max_age_ms),
+        ..CONFIG
+    };
     service.route_request(Box::new(move |request| {
         // ALLOW-BANNED: the tick a bare quote defaults to. Pricing itself is
         // pure — every function above takes the tick as an argument — and this
@@ -230,6 +247,7 @@ fn main() -> std::io::Result<()> {
             request,
             tick_of(u64::try_from(millis).unwrap_or(0)),
             venue.as_ref(),
+            &config,
         )
     }));
 
@@ -251,7 +269,7 @@ mod tests {
     use super::*;
 
     fn quote(target: &str, now: u64) -> Response {
-        handle(&Request::get(target), now, &synthetic_venue).unwrap()
+        handle(&Request::get(target), now, &synthetic_venue, &CONFIG).unwrap()
     }
 
     fn venue(instrument: &Instrument, tick: u64) -> Quote {
@@ -312,13 +330,13 @@ mod tests {
     /// INV-062 — a quote from stale state is refused, not emitted as live.
     #[test]
     fn inv_062_a_stale_quote_is_refused_rather_than_served() {
-        // Two ticks back is 500ms, exactly the limit: still live.
+        // Eight ticks back is 2000ms, exactly the limit: still live.
         assert_eq!(
-            quote("/v1/quote?symbol=EURUSD&tick=3999998", 4_000_000).status,
+            quote("/v1/quote?symbol=EURUSD&tick=3999992", 4_000_000).status,
             200
         );
-        // Three ticks back is 750ms: refused.
-        let stale = quote("/v1/quote?symbol=EURUSD&tick=3999997", 4_000_000);
+        // Nine ticks back is 2250ms: refused.
+        let stale = quote("/v1/quote?symbol=EURUSD&tick=3999991", 4_000_000);
         assert_eq!(stale.status, 409);
         assert!(stale.body.contains("stale_market_state"));
     }
@@ -391,6 +409,7 @@ mod tests {
             &Request::get("/v1/quote?symbol=EURUSD&tick=4000000"),
             4_000_000,
             unreachable.as_ref(),
+            &CONFIG,
         )
         .unwrap();
         assert_eq!(refused.status, 503);

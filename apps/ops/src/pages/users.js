@@ -9,6 +9,7 @@
  */
 
 import { ago, badge, esc, icon, kpi, table, unavailable } from "../ui/layout.js";
+import { userOrderBook } from "./trading.js";
 
 /**
  * @param {{users: any[], q: string, sort: string, error: string|null}} data
@@ -196,6 +197,10 @@ export function userDetailPage({ detail, csrf, error, userId }) {
           empty: "No trading account has been opened.",
         })}
       </div>
+
+      <!-- The order book: the ledger's own record of this person's accounts,
+           valued now — positions, and every order with its outcome. -->
+      ${userOrderBook(detail.tradingAccounts ?? [], detail.ledgerReachable !== false)}
 
       <div class="card">
         <div class="card-head"><h2 class="h2 grow">Security history</h2></div>
