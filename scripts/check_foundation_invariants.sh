@@ -115,7 +115,7 @@ pass "INV-902 no package installs in a Rust runtime stage"
 # proves they did.
 if command -v docker >/dev/null 2>&1; then
   checked=0
-  for image in projectx/client-api:dev projectx/web:dev; do
+  for image in projectx/client-api:dev projectx/web:dev projectx/ops:dev projectx/feed-gateway:dev projectx/mt5-sim:dev; do
     docker image inspect "$image" >/dev/null 2>&1 || continue
     checked=$((checked + 1))
     found=""

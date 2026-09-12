@@ -523,7 +523,7 @@ fi
 # Nothing in the pipeline rendered CSS, so nothing noticed.
 # ---------------------------------------------------------------------------
 if [ -d apps/web/tests ] && command -v node >/dev/null 2>&1; then
-  if (cd apps/web && node --test tests/) >/tmp/projectx-ui-inv.out 2>&1; then
+  if (cd apps/web && node --test "tests/**/*.test.js") >/tmp/projectx-ui-inv.out 2>&1; then
     passed="$(grep -oE 'pass [0-9]+' /tmp/projectx-ui-inv.out | head -1)"
     pass "INV-190/191 rendered-output suites ($passed)"
   else

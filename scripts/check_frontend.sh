@@ -58,7 +58,8 @@ if [ "$WANT" = "all" ] || [ "$WANT" = "--tests" ]; then
   step "G2 — frontend test suites"
   for suite in apps/web apps/ops; do
     [ -d "$suite/tests" ] || continue
-    if (cd "$suite" && node --test tests/) >/tmp/projectx-jstest.out 2>&1; then
+    # A glob, not a directory: Node 22 (the CI runner) only takes patterns.
+    if (cd "$suite" && node --test "tests/**/*.test.js") >/tmp/projectx-jstest.out 2>&1; then
       echo "  ✓ $suite  $(grep -oE '^# pass [0-9]+|ℹ pass [0-9]+' /tmp/projectx-jstest.out | tail -1)"
     else
       echo "  ✗ $suite"; sed 's/^/      /' /tmp/projectx-jstest.out | tail -40; fail=1
@@ -68,7 +69,7 @@ if [ "$WANT" = "all" ] || [ "$WANT" = "--tests" ]; then
   for suite in services/client-api services/feed-gateway services/mt5-sim; do
     [ -d "$suite/src" ] || continue
     [ -n "$(find "$suite/src" -name '*.test.js' -print -quit 2>/dev/null)" ] || continue
-    if (cd "$suite" && node --test src/) >/tmp/projectx-jstest.out 2>&1; then
+    if (cd "$suite" && node --test "src/**/*.test.js") >/tmp/projectx-jstest.out 2>&1; then
       echo "  ✓ $suite  $(grep -oE '^# pass [0-9]+|ℹ pass [0-9]+' /tmp/projectx-jstest.out | tail -1)"
     else
       echo "  ✗ $suite"; sed 's/^/      /' /tmp/projectx-jstest.out | tail -40; fail=1

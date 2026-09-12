@@ -158,6 +158,9 @@ jobs:
     needs: structure
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The secret scan walks the whole history, not the tip.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2

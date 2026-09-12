@@ -37,9 +37,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Kill the ledger mid-transaction, restart, assert equality
+      - uses: docker/setup-buildx-action@v3
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The suite kills real processes, so real processes must be running:
+      # the whole stack, built from this commit, healthy before the first kill.
+      - name: Start the stack from this commit
+        run: |
+          cp .env.example .env
+          docker compose --profile core --profile edge --profile web up -d --build
+          timeout 300 bash -c 'until curl -fsS http://127.0.0.1:27001/health >/dev/null 2>&1 && curl -fsS http://127.0.0.1:27000/api/health >/dev/null 2>&1; do sleep 3; done'
+          sleep 10
+      - name: Kill the database, market-data, the ledger, the OMS and pricing; assert the laws after each
         run: ./scripts/chaos_suite.sh
         continue-on-error: false
+      - name: Teardown
+        if: always()
+        run: docker compose --profile all down -v
 
   g9-performance:
     name: G9 · performance
