@@ -219,7 +219,7 @@ services:
 
   # Documents, statements, artifacts, and the recorded fixtures G6 replays.
   minio:
-    image: minio/minio:RELEASE.2024-09-22T00-33-43Z
+    image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
     container_name: projectx-minio
     profiles: [infra, all]
     restart: unless-stopped

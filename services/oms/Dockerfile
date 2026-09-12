@@ -22,6 +22,10 @@ RUN cargo build --release --bin oms -p oms \
  && cargo build --release --bin healthcheck -p service-kit
 
 FROM alpine:3.20 AS runtime
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 RUN adduser -D -u 10001 app
 COPY --from=builder /build/target/release/oms /usr/local/bin/service
 COPY --from=builder /build/target/release/healthcheck /usr/local/bin/healthcheck

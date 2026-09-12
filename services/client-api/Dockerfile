@@ -30,6 +30,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
 FROM node:22-alpine AS runtime
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 
 # Security patches for the base layer, before anything else.
 #

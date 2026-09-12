@@ -13,6 +13,10 @@
 # =============================================================================
 
 FROM node:22-alpine AS runtime
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 
 # Security patches for the base layer. The published base still carries openssl
 # 3.5.7-r0 (CVE-2026-14456, HIGH, fixed in 3.5.8-r0). See the note in

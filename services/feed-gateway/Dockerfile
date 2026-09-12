@@ -9,6 +9,10 @@
 # =============================================================================
 
 FROM node:22-alpine AS runtime
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 
 RUN apk --no-cache upgrade libcrypto3 libssl3
 

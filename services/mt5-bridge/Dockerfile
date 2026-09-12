@@ -17,6 +17,10 @@
 # =============================================================================
 
 FROM ubuntu:24.04
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 
 ENV DEBIAN_FRONTEND=noninteractive \
     WINEPREFIX=/home/app/.wine \

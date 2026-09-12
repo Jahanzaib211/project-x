@@ -85,6 +85,11 @@ MetaTrader 5 terminal under Wine. Without `MT5_LOGIN`, `MT5_PASSWORD` and
 that login's quotes, mirrors the core's fills and is reconciled against the
 ledger continuously — the platform is never the source of truth.
 
+**Images.** Every push to `main` publishes the deployed images to
+`ghcr.io/jahanzaib211/project-x/<service>:{sha,latest}` (ledger, market-data,
+pricing, oms, feed-gateway, mt5-sim, client-api, web, ops); `make images`
+rebuilds them from scratch locally and `make images-push` publishes by hand.
+
 **On ports.** This project takes a reserved block, `27000–27030`, bound to
 `127.0.0.1` only. `make up` runs `make ports` first and **refuses to start if any
 of them is in use**, so it can never take a port from something already running

@@ -2,6 +2,10 @@
 # 21-external — mt5-sim: the simulated bridge. Same runtime discipline as the
 # other Node services (INV-902): no npm, no apk, non-root.
 FROM node:22-alpine AS runtime
+# GHCR links a package to its repository through this label, and the
+# package then inherits the repository's visibility.
+LABEL org.opencontainers.image.source="https://github.com/Jahanzaib211/project-x"
+
 RUN apk --no-cache upgrade libcrypto3 libssl3
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn* /root/.npm /tmp/* \
     && rm -rf /sbin/apk /usr/sbin/apk /etc/apk /lib/apk /usr/share/apk /var/cache/apk

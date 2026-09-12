@@ -82,10 +82,15 @@ build: ## Build all service images
 # -----------------------------------------------------------------------------
 # `images` rebuilds every deployed service image from scratch — no layer
 # cache, base images re-pulled — which is what "fresh" means. `images-push`
-# tags them for GHCR under IMAGE_OWNER and pushes; it needs a registry login
-# (`echo $$TOKEN | docker login ghcr.io -u <user> --password-stdin`, or
-# `gh auth token | docker login ghcr.io -u <user> --password-stdin`).
+# tags them ghcr.io/<owner>/project-x/<svc> and pushes; it needs a registry
+# login (`gh auth token | docker login ghcr.io -u <user> --password-stdin`).
+#
+# The repository-scoped name is deliberate: a package first created by a
+# push from the repository's own Actions token is linked to the repository
+# and inherits its visibility — public, here — whereas one first pushed by a
+# person is private and unlinked, and can only be changed in the GitHub UI.
 IMAGE_OWNER ?= jahanzaib211
+IMAGE_REPO  ?= project-x
 IMAGE_TAG   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IMAGES      := ledger market-data pricing oms feed-gateway mt5-sim client-api web ops
 
@@ -95,12 +100,12 @@ images: ## Rebuild every deployed image with no cache and fresh base layers
 	@echo "✓ fresh images: $(IMAGES)"
 
 .PHONY: images-push
-images-push: ## Tag the images ghcr.io/$(IMAGE_OWNER)/projectx-<svc>:{$(IMAGE_TAG),latest} and push
+images-push: ## Tag the images ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/<svc>:{$(IMAGE_TAG),latest} and push
 	@for svc in $(IMAGES); do \
-	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/projectx-$$svc:$(IMAGE_TAG) && \
-	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/projectx-$$svc:latest && \
-	  docker push ghcr.io/$(IMAGE_OWNER)/projectx-$$svc:$(IMAGE_TAG) && \
-	  docker push ghcr.io/$(IMAGE_OWNER)/projectx-$$svc:latest || exit 1; \
+	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:$(IMAGE_TAG) && \
+	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:latest && \
+	  docker push ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:$(IMAGE_TAG) && \
+	  docker push ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:latest || exit 1; \
 	done
 	@echo "✓ pushed $(IMAGES) as $(IMAGE_TAG) and latest"
 
