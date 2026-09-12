@@ -311,7 +311,7 @@ jobs:
       - name: Build all service images
         run: |
           cp .env.example .env
-          docker compose --profile core --profile edge --profile web build
+          docker compose --profile core --profile edge --profile web --profile ops build
 
       # On main the same images are published, publicly, to GHCR — tagged
       # with the commit they were built from and as latest. A PR builds and
