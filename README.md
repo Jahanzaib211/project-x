@@ -89,6 +89,8 @@ ledger continuously — the platform is never the source of truth.
 `ghcr.io/jahanzaib211/projectx/<service>:{sha,latest}` (ledger, market-data,
 pricing, oms, feed-gateway, mt5-sim, client-api, web, ops); `make images`
 rebuilds them from scratch locally and `make images-push` publishes by hand.
+The MT5 bridge image (`projectx/mt5-bridge`, ~6 GB) is published by its own
+workflow when `services/mt5-bridge/` changes.
 
 **On ports.** This project takes a reserved block, `27000–27030`, bound to
 `127.0.0.1` only. `make up` runs `make ports` first and **refuses to start if any

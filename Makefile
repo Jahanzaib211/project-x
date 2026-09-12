@@ -101,8 +101,13 @@ images: ## Rebuild every deployed image with no cache and fresh base layers
 	@echo "✓ fresh images: $(IMAGES)"
 
 .PHONY: images-push
-images-push: ## Tag the images ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/<svc>:{$(IMAGE_TAG),latest} and push
-	@for svc in $(IMAGES); do \
+# The MT5 bridge (Wine + terminal + Windows Python, ~6 GB) is not in the
+# gate graph: `bridge.yml` builds and publishes it separately. `images-push`
+# takes SVCS= to push a subset, which is how that workflow uses it.
+SVCS ?= $(IMAGES)
+
+images-push: ## Tag the images ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/<svc>:{$(IMAGE_TAG),latest} and push (SVCS= to narrow)
+	@for svc in $(SVCS); do \
 	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:$(IMAGE_TAG) && \
 	  docker tag projectx/$$svc:dev ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:latest && \
 	  docker push ghcr.io/$(IMAGE_OWNER)/$(IMAGE_REPO)/$$svc:$(IMAGE_TAG) && \
