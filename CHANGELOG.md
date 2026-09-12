@@ -36,6 +36,91 @@ Entry template:
 
 ## [Unreleased]
 
+### Added — real prices, trading sessions, one account system, the chart suite, the MT5 bridge
+
+- **`04-account`, `03-ledger`, `19-client-api`, `20-web`** — One account, one
+  number (INV-033): the ledger issues every account number; the client area
+  keeps its record under it. Demo accounts open funded, real accounts open
+  unfunded and say so; archiving freezes in the ledger. Demo capital is the
+  one live funding path (INV-034, INV-035): idempotent top-ups within a cap,
+  a reset to the grant while flat. The open dialog follows the tab and the
+  page lands where the account is. Legacy records are re-keyed at startup.
+  Gates: G0–G8. Invariants: INV-033, INV-034, INV-035 added.
+
+- **`06-market-data`, `07-pricing`, `09-risk`, `20-web`** — Trading sessions
+  (INV-053, INV-084): a per-class calendar in UTC (FX, metals with a daily
+  break, crypto continuous, fixed holidays), pure in the tick. Outside its
+  session an instrument's quote is frozen at the last open tick and says so;
+  candles skip closed windows; risk refuses an order on a closed market before
+  price or margin is considered; the terminal shows a closed-market banner and
+  disables the ticket.
+  Gates: G0–G9. Invariants: INV-053, INV-084 added.
+
+- **`06-market-data`** — The recorded feed (INV-054): validated at the door
+  with a spike filter (INV-050), one digest over everything accepted, an
+  append-only `feed.log` with batch fsync, per-symbol modes (synthetic or
+  recorded-from-source) logged with the tick they took effect at so a past
+  quote is the same answer forever, an operator-settable source order per
+  class, a watchdog that falls back to the pure function on silence.
+  Gates: G0–G7, G9. Invariants: INV-054 added.
+
+- **`13-lp-connectivity`** — `services/feed-gateway` (Node, zero dependencies):
+  one adapter interface with health and a circuit breaker (INV-120, INV-121);
+  Binance (keyless, live BTCUSD with backfill), Twelve Data, Finnhub, the MT5
+  bridge over SSE with candle backfill, a simulated LP that injects
+  duplicates, reordering, crossed quotes and drops; per-symbol selection and
+  failover; batched delivery to market-data, applied once (INV-122).
+  Gates: G0–G9. Invariants: INV-121 restated to what is built.
+
+- **`21-external`** — One bridge protocol spoken by `mt5-sim` (deterministic,
+  for CI) and `mt5-bridge` (a MetaTrader 5 terminal under Wine 10, fronted by
+  `bridge.py`; unconfigured until a login is supplied). The reconciler in
+  `client-api` mirrors the mapped account's net position to the platform,
+  raises a break on divergence that survives mirroring (INV-201), and carries
+  a platform-originated deal into the core only through the OMS, keyed by its
+  ticket (INV-200). Gates: G0–G2, G4–G6, G8. Invariants: unchanged.
+
+- **`20-web`** — The chart suite: KLineChart 10.0.3 (Apache-2.0, vendored,
+  served from this origin under the unchanged CSP). Candle/hollow/OHLC/area,
+  built-in indicators, drawing tools, position lines, 4h and 1d intervals,
+  paging by pinned tick. Live over one server-sent-event stream per tab
+  (`GET /v1/stream`), polling kept as a safety net. Numbers reach the library
+  for pixels only; every displayed figure is still the API's string.
+
+- **`apps/ops`, `19-client-api`** — Market feed (source order per class,
+  provider health), the whole ledger (trial balance, paged journal,
+  invariants), every order with its owner, the person's order book on each
+  user, live per-user telemetry over an operator event stream (in memory,
+  never a metric label), the MT5 bridge (map, unmap, cycle, breaks, actions).
+
+- **Gates** — Property laws for the core, the OMS lifecycle, pricing, the
+  feed and the edge's money boundary; replay of the real core from its
+  journal; a live-stack integration suite; chaos on the ledger, the OMS,
+  pricing and market-data; core-surface probes; the order path measured. The
+  e2e suite chooses an open market at run time and prices the tree-run stack
+  on the simulator alone, in its own database.
+
+### Fixed
+
+- **`05-position`, `09-risk`** — A residual position below the venue minimum
+  could never be closed; a close of the whole residual now bypasses the
+  opening minimum. Found by `core_laws`.
+- **`03-ledger`, `10-oms`** — Order history and idempotency keys did not
+  survive a restart; deals are logged with their order fields and rejections
+  are logged, and the OMS resolves an UNKNOWN order on retry by asking the
+  ledger rather than assuming. Found by `core_replay` and the chaos suite.
+- **`07-pricing`** — On a venue spread wider than the markup the client quote
+  sat inside the venue's; the markup is now applied outward from the venue's
+  own sides. Found by `pricing_laws`.
+- **`19-client-api`** — A signed amount was accepted at the edge; amounts are
+  magnitudes and a minus sign is refused. Found by `money.test.js`.
+- **`07-pricing`** — The staleness limit was a synthetic-era 500ms that
+  refused a real feed's quotes at the gateway's own batch cadence; it now
+  reads `MAX_QUOTE_STALENESS_MS` and defaults to the two seconds risk accepts.
+- **`services/mt5-bridge`** — The MetaQuotes installer refuses to run under
+  Wine 11 ("a debugger has been found"); Wine 10.0 is pinned.
+
+
 ### Added — Project X Ops, the operator console
 
 A standalone app on its own port with its own deploy (`apps/ops`, `:27030`),

@@ -23,8 +23,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WINEARCH=win64 \
     WINEDEBUG=-all \
     # No Mono, no Gecko: neither is needed, and their installers are dialogs
-    # that wait forever for a click nobody can give under Xvfb.
-    WINEDLLOVERRIDES="mscoree=d;mshtml=d" \
+    # that wait forever for a click nobody can give under Xvfb. No winedbg:
+    # a crash must exit, not attach a debugger and wait forever.
+    WINEDLLOVERRIDES="mscoree=d;mshtml=d;winedbg.exe=d" \
     PORT=8000
 
 RUN dpkg --add-architecture i386 \
@@ -54,7 +55,9 @@ RUN wineboot --init && wineserver -w \
  && curl -fsSL https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe -o /tmp/python.exe \
  && xvfb-run -a wine /tmp/python.exe /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 TargetDir='C:\Python311' \
  && rm /tmp/python.exe \
- && xvfb-run -a wine 'C:\Python311\python.exe' -m pip install --no-cache-dir --disable-pip-version-check MetaTrader5
+ # numpy 2 calls ucrtbase.crealf, which Wine 10 does not implement, and the
+ # package imports numpy; 1.26 does not, and MetaTrader5 is happy with it.
+ && xvfb-run -a wine 'C:\Python311\python.exe' -m pip install --no-cache-dir --disable-pip-version-check "numpy<2" MetaTrader5
 
 # The terminal. `/auto` downloads and installs silently into Program Files
 # inside the prefix; the installer then lingers on an advertisement, so the

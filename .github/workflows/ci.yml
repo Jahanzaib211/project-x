@@ -22,6 +22,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# The workflow needs to write packages only to publish images on main; the
+# rest is read-only. Declared once, at the top, so a job cannot widen it.
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
 jobs:
 
   # ---------------------------------------------------------------------------
@@ -170,8 +177,9 @@ jobs:
 
       - name: Install JS dev dependencies
         run: |
-          (cd services/client-api && npm ci)
-          (cd apps/web && npm ci)
+          for pkg in services/client-api services/feed-gateway services/mt5-sim apps/web apps/ops; do
+            (cd "$pkg" && npm ci)
+          done
 
       - name: JavaScript syntax and types
         run: |
@@ -204,9 +212,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
-      - name: Frontend test suites (screens, stylesheet)
+      - name: Frontend test suites (screens, stylesheet, services)
         run: |
-          (cd apps/web && npm ci)
+          for pkg in services/client-api services/feed-gateway services/mt5-sim apps/web apps/ops; do
+            (cd "$pkg" && npm ci)
+          done
           ./scripts/check_frontend.sh --tests
 
       - name: No test was skipped without a linked issue
@@ -299,6 +309,22 @@ jobs:
         run: |
           cp .env.example .env
           docker compose --profile core --profile edge --profile web build
+
+      # On main the same images are published, publicly, to GHCR — tagged
+      # with the commit they were built from and as latest. A PR builds and
+      # does not push: nothing unreviewed becomes an image somebody can pull.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push images to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          make images-push IMAGE_OWNER="$owner" IMAGE_TAG="${GITHUB_SHA::7}"
 
   # ---------------------------------------------------------------------------
   # Single required status for branch protection.

@@ -62,12 +62,30 @@ Then:
 | Pricing | http://127.0.0.1:27004/health |
 | OMS | http://127.0.0.1:27005/health |
 | Redpanda console | http://127.0.0.1:27006 |
+| Feed gateway | http://127.0.0.1:27021/v1/adapters |
+| MT5 simulator | http://127.0.0.1:27022/v1/state |
+| MT5 bridge (`--profile external`) | http://127.0.0.1:27023/v1/state |
+| Project X Ops | http://127.0.0.1:27030 |
 | Grafana | http://127.0.0.1:27014 |
 | Prometheus | http://127.0.0.1:27013 |
 | Jaeger | http://127.0.0.1:27015 |
 | MinIO console | http://127.0.0.1:27012 |
 
-**On ports.** This project takes a reserved block, `27000–27019`, bound to
+**Prices.** A fresh install prices every instrument synthetically — a pure
+function of the clock tick, exact to replay. The feed gateway runs whichever
+real providers the operator console lists per instrument class (Binance is
+keyless; Twelve Data and Finnhub take a key in `.env`; the MT5 bridge takes a
+login) and the moment one speaks, that instrument is priced from the recorded
+feed instead. Markets close: FX and metals keep their sessions, and an order on
+a closed market is refused rather than filled at a frozen price.
+
+**MT5.** `docker compose --profile external up -d mt5-bridge` runs a real
+MetaTrader 5 terminal under Wine. Without `MT5_LOGIN`, `MT5_PASSWORD` and
+`MT5_SERVER` it reports `unconfigured`; with any broker's demo login it streams
+that login's quotes, mirrors the core's fills and is reconciled against the
+ledger continuously — the platform is never the source of truth.
+
+**On ports.** This project takes a reserved block, `27000–27030`, bound to
 `127.0.0.1` only. `make up` runs `make ports` first and **refuses to start if any
 of them is in use**, so it can never take a port from something already running
 on your machine. Every port is an env var in `.env`; change one and nothing else
