@@ -270,3 +270,11 @@ See [docs/14-roadmap.md](docs/14-roadmap.md) and [CHANGELOG.md](CHANGELOG.md).
 ## Licence
 
 Proprietary. See [LICENSE](LICENSE).
+
+---
+
+## Work with me
+
+Built by Jahanzaib Ali, Founder & Systems Engineer at [AliLabsX](https://alilabsx.com). I don't rent, I build: I run my own hardware and keep my own data.
+
+[Jahanzaib@alilabsx.com](mailto:Jahanzaib@alilabsx.com) · [alilabsx.com](https://alilabsx.com) · [LinkedIn](https://www.linkedin.com/in/jahanzaib-ali-labsx)
