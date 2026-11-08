@@ -36,6 +36,12 @@ Entry template:
 
 ## [Unreleased]
 
+### Changed — README footer
+
+- **docs** — README gains a "Work with me" footer with the owner's contact
+  details. Documentation only: no module or gate touched.
+  Invariants: unchanged.
+
 ### Added — real prices, trading sessions, one account system, the chart suite, the MT5 bridge
 
 - **`04-account`, `03-ledger`, `19-client-api`, `20-web`** — One account, one
